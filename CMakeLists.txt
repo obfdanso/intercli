@@ -129,6 +129,20 @@ target_link_libraries(test_aes_gcm
 
 add_test(NAME aes_gcm COMMAND test_aes_gcm)
 
+add_executable(test_chat_envelope
+    tests/test_chat_envelope.cpp
+)
+
+target_include_directories(test_chat_envelope PRIVATE include crypto)
+target_link_libraries(test_chat_envelope
+    crypto_lib
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    Threads::Threads
+)
+
+add_test(NAME chat_envelope COMMAND test_chat_envelope)
+
 # Set compiler flags and platform-specific settings
 if(MSVC)
     target_compile_options(server PRIVATE /W4)

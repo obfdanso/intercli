@@ -13,6 +13,7 @@
 #include <random>
 #include <mutex>
 #include <cstring>
+#include <algorithm>
 #include <stdexcept>
 #include <sstream>
 #include <iomanip>
@@ -38,6 +39,8 @@ constexpr size_t SIGNATURE_SIZE = 256;
 constexpr size_t HMAC_SIZE = 32;
 constexpr size_t GCM_TAG_SIZE = 16;
 constexpr size_t MAX_PUBLIC_KEY_SIZE = 2048;
+constexpr size_t MAX_NAME_LEN = 32;
+constexpr size_t MAX_TEXT_LEN = 1024;
 constexpr size_t MAX_FRAME_SIZE = 65536;
 
 // Message types
@@ -64,6 +67,19 @@ enum class ForwardSecrecyType : uint8_t {
     PERFECT_FORWARD_SECRECY = 0x03
 };
 
+// Chat envelope types, carried inside the encrypted payload
+enum class ChatType : uint8_t {
+    REGISTER      = 0x01,
+    REGISTER_OK   = 0x02,
+    REGISTER_FAIL = 0x03,
+    DIRECT        = 0x04,
+    BROADCAST     = 0x05,
+    WHO           = 0x06,
+    ROSTER        = 0x07,
+    PRESENCE      = 0x08,
+    NOTICE        = 0x09,
+};
+
 // Message header structure
 struct MessageHeader {
     ProtocolVersion version;
@@ -84,6 +100,16 @@ struct HandshakeMessage {
     uint16_t public_key_len;
     uint8_t public_key[MAX_PUBLIC_KEY_SIZE];
     uint8_t nonce[IV_SIZE];
+};
+
+// Chat message envelope. Travels inside the AES-GCM ciphertext, so the server
+// can route on it while the network sees only ciphertext.
+struct ChatMessage {
+    ChatType type;
+    char     sender[MAX_NAME_LEN];
+    char     recipient[MAX_NAME_LEN];
+    uint16_t text_len;
+    char     text[MAX_TEXT_LEN];
 };
 
 // Encrypted message structure
@@ -256,6 +282,73 @@ inline EncryptedMessage deserialize_encrypted_message(const std::vector<uint8_t>
     }
     EncryptedMessage msg;
     std::memcpy(&msg, data.data(), sizeof(EncryptedMessage));
+    return msg;
+}
+
+inline ChatMessage make_chat(ChatType type) {
+    ChatMessage msg{};
+    msg.type = type;
+    msg.text_len = 0;
+    return msg;
+}
+
+inline void set_chat_field(char* field, size_t field_size, const std::string& value) {
+    std::memset(field, 0, field_size);
+    const size_t copy_len = std::min(value.size(), field_size - 1);
+    std::memcpy(field, value.data(), copy_len);
+}
+
+inline std::string get_chat_field(const char* field, size_t field_size) {
+    size_t len = 0;
+    while (len < field_size && field[len] != '\0') {
+        ++len;
+    }
+    return std::string(field, len);
+}
+
+inline void set_chat_text(ChatMessage& msg, const std::string& text) {
+    const size_t copy_len = std::min(text.size(), MAX_TEXT_LEN);
+    std::memset(msg.text, 0, MAX_TEXT_LEN);
+    std::memcpy(msg.text, text.data(), copy_len);
+    msg.text_len = static_cast<uint16_t>(copy_len);
+}
+
+inline std::string get_chat_text(const ChatMessage& msg) {
+    if (msg.text_len > MAX_TEXT_LEN) {
+        throw std::runtime_error("Chat text_len out of range");
+    }
+    return std::string(msg.text, msg.text_len);
+}
+
+// Printable ASCII excluding space: 0x21 to 0x7E rules out control characters,
+// space and tab in one check, keeping names typeable in the @name shorthand.
+inline bool is_valid_name(const std::string& name) {
+    if (name.empty() || name.size() >= MAX_NAME_LEN) {
+        return false;
+    }
+    for (unsigned char c : name) {
+        if (c < 0x21 || c > 0x7E) {
+            return false;
+        }
+    }
+    return true;
+}
+
+inline std::vector<uint8_t> serialize_chat(const ChatMessage& msg) {
+    std::vector<uint8_t> data(sizeof(ChatMessage));
+    std::memcpy(data.data(), &msg, sizeof(ChatMessage));
+    return data;
+}
+
+inline ChatMessage deserialize_chat(const std::vector<uint8_t>& data) {
+    if (data.size() < sizeof(ChatMessage)) {
+        throw std::runtime_error("Invalid chat message size");
+    }
+    ChatMessage msg;
+    std::memcpy(&msg, data.data(), sizeof(ChatMessage));
+    if (msg.text_len > MAX_TEXT_LEN) {
+        throw std::runtime_error("Chat text_len out of range");
+    }
     return msg;
 }
 
