@@ -143,6 +143,20 @@ target_link_libraries(test_chat_envelope
 
 add_test(NAME chat_envelope COMMAND test_chat_envelope)
 
+add_executable(test_directional_keys
+    tests/test_directional_keys.cpp
+)
+
+target_include_directories(test_directional_keys PRIVATE include crypto)
+target_link_libraries(test_directional_keys
+    crypto_lib
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    Threads::Threads
+)
+
+add_test(NAME directional_keys COMMAND test_directional_keys)
+
 # Set compiler flags and platform-specific settings
 if(MSVC)
     target_compile_options(server PRIVATE /W4)

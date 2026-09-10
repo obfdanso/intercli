@@ -256,6 +256,30 @@ std::vector<uint8_t> CryptoManager::derive_shared_secret(const std::vector<uint8
     return derive_key(dh_result, salt, KEY_SIZE);
 }
 
+SessionKeys CryptoManager::derive_directional_keys(const std::vector<uint8_t>& shared_secret,
+                                                   const std::vector<uint8_t>& nonce,
+                                                   bool is_server) {
+    // Two distinct salts give two independent keys from one shared secret, so each
+    // direction can be rotated by its own sender without disturbing the other.
+    std::vector<uint8_t> c2s_salt = nonce;
+    c2s_salt.push_back(0x01);
+    std::vector<uint8_t> s2c_salt = nonce;
+    s2c_salt.push_back(0x02);
+
+    std::vector<uint8_t> client_to_server = derive_shared_secret(shared_secret, c2s_salt);
+    std::vector<uint8_t> server_to_client = derive_shared_secret(shared_secret, s2c_salt);
+
+    SessionKeys keys;
+    if (is_server) {
+        keys.tx_key = server_to_client;
+        keys.rx_key = client_to_server;
+    } else {
+        keys.tx_key = client_to_server;
+        keys.rx_key = server_to_client;
+    }
+    return keys;
+}
+
 std::vector<uint8_t> CryptoManager::sha256_hash(const std::vector<uint8_t>& data) {
     EVPMDContext ctx;
     unsigned int hash_len = EVP_MD_size(EVP_sha256());
