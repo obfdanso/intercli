@@ -165,9 +165,11 @@ public:
     AuthResult verify_session_auth(uint32_t session_id, const std::vector<uint8_t>& signature);
     
     // Session key management
-    void set_session_key(uint32_t session_id, const std::vector<uint8_t>& key);
-    std::vector<uint8_t> get_session_key(uint32_t session_id);
-    void rotate_session_key(uint32_t session_id);
+    void set_session_keys(uint32_t session_id, const SessionKeys& keys);
+    std::vector<uint8_t> get_tx_key(uint32_t session_id);
+    std::vector<uint8_t> get_rx_key(uint32_t session_id);
+    void rotate_tx_key(uint32_t session_id);
+    void rotate_rx_key(uint32_t session_id);
     
     // Session cleanup
     void cleanup_expired_sessions(std::chrono::seconds max_age = std::chrono::hours(24));

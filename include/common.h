@@ -128,7 +128,8 @@ struct SessionInfo {
     std::chrono::system_clock::time_point created_at;
     std::chrono::system_clock::time_point last_activity;
     std::vector<uint8_t> shared_secret;
-    std::vector<uint8_t> current_key;
+    std::vector<uint8_t> tx_key;
+    std::vector<uint8_t> rx_key;
     uint32_t message_counter;
     bool authenticated;
     bool key_rotated;

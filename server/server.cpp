@@ -230,13 +230,14 @@ private:
             
             // Derive session key
             std::vector<uint8_t> client_nonce_vec(client_handshake.nonce, client_handshake.nonce + SecureComm::IV_SIZE);
-            std::vector<uint8_t> session_key = crypto_manager_->derive_shared_secret(
-                shared_secret, client_nonce_vec);
+            SecureComm::SessionKeys keys = crypto_manager_->derive_directional_keys(
+                shared_secret, client_nonce_vec, true);
 
-            // Store session key
-            session_manager_->set_session_key(session.session_id, session_key);
+            // Store session keys
+            session_manager_->set_session_keys(session.session_id, keys);
             session.shared_secret = shared_secret;
-            session.current_key = session_key;
+            session.tx_key = keys.tx_key;
+            session.rx_key = keys.rx_key;
 
             // Step 4: Send handshake response
             SecureComm::HandshakeMessage server_handshake{};
@@ -322,7 +323,7 @@ private:
                     }
 
                     // Decrypt message
-                    std::vector<uint8_t> key = session_manager_->get_session_key(session.session_id);
+                    std::vector<uint8_t> key = session_manager_->get_rx_key(session.session_id);
                     std::vector<uint8_t> iv(encrypted_msg.iv, encrypted_msg.iv + SecureComm::IV_SIZE);
                     
                     std::vector<uint8_t> decrypted_data = crypto_manager_->decrypt_aes_gcm(
@@ -340,16 +341,12 @@ private:
                     send_encrypted_message(client_socket, session, response);
 
                     message_counter++;
-                    
-                    // Rotate key every 10 messages for forward secrecy
-                    if (message_counter % 10 == 0) {
-                        session_manager_->rotate_session_key(session.session_id);
-                        std::cout << "Key rotated for session " << session.session_id << std::endl;
-                    }
 
                 } else if (header.type == SecureComm::MessageType::KEY_ROTATION) {
-                    // Handle key rotation request
-                    session_manager_->rotate_session_key(session.session_id);
+                    // Handle key rotation request. Both directions rotate together here;
+                    // in-band per-direction rotation replaces this next.
+                    session_manager_->rotate_rx_key(session.session_id);
+                    session_manager_->rotate_tx_key(session.session_id);
                     std::cout << "Key rotation completed for session " << session.session_id << std::endl;
                     
                     // Send key rotation confirmation
@@ -375,7 +372,7 @@ private:
     void send_encrypted_message(int client_socket, const SecureComm::SessionInfo& session, const std::string& message) {
         try {
             std::vector<uint8_t> message_data(message.begin(), message.end());
-            std::vector<uint8_t> key = session_manager_->get_session_key(session.session_id);
+            std::vector<uint8_t> key = session_manager_->get_tx_key(session.session_id);
             std::vector<uint8_t> iv = crypto_manager_->generate_random_bytes(SecureComm::IV_SIZE);
             
             std::vector<uint8_t> encrypted_data = crypto_manager_->encrypt_aes_gcm(message_data, key, iv);

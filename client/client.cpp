@@ -31,7 +31,7 @@ private:
     SecureComm::KeyPair client_keypair_;
     SecureComm::KeyPair dh_keypair_;
     SecureComm::SessionInfo current_session_;
-    std::vector<uint8_t> session_key_;
+    SecureComm::SessionKeys session_keys_;
     uint32_t message_counter_;
 
 public:
@@ -124,7 +124,7 @@ public:
             std::vector<uint8_t> message_data(message.begin(), message.end());
             std::vector<uint8_t> iv = crypto_manager_->generate_random_bytes(SecureComm::IV_SIZE);
             
-            std::vector<uint8_t> encrypted_data = crypto_manager_->encrypt_aes_gcm(message_data, session_key_, iv);
+            std::vector<uint8_t> encrypted_data = crypto_manager_->encrypt_aes_gcm(message_data, session_keys_.tx_key, iv);
             
             SecureComm::EncryptedMessage encrypted_msg{};
             encrypted_msg.session_id = current_session_.session_id;
@@ -169,14 +169,6 @@ public:
                 std::cout << "Server response: " << response << std::endl;
             }
 
-            // The server rotates unprompted every 10 messages, so mirror its schedule
-            // here. Both sides count the same exchanges and derive the same key.
-            if (message_counter_ % 10 == 0) {
-                session_key_ = crypto_manager_->rotate_session_key(session_key_,
-                    std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(&current_session_.session_id),
-                                        reinterpret_cast<const uint8_t*>(&current_session_.session_id) + sizeof(current_session_.session_id)));
-            }
-
             return true;
 
         } catch (const std::exception& e) {
@@ -211,11 +203,13 @@ public:
 
             SecureComm::MessageHeader response_header = SecureComm::deserialize_header(response_data);
             if (response_header.type == SecureComm::MessageType::KEY_ROTATION) {
-                // Update session key
-                session_key_ = crypto_manager_->rotate_session_key(session_key_, 
-                    std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(&current_session_.session_id), 
-                                        reinterpret_cast<const uint8_t*>(&current_session_.session_id) + sizeof(current_session_.session_id)));
-                
+                // Rotate both directions to match the server.
+                session_keys_.rx_key = crypto_manager_->rotate_session_key(
+                    session_keys_.rx_key, session_id_bytes());
+                session_keys_.tx_key = crypto_manager_->rotate_session_key(
+                    session_keys_.tx_key, session_id_bytes());
+
+
                 std::cout << "Key rotation completed successfully" << std::endl;
                 return true;
             } else {
@@ -255,6 +249,12 @@ public:
     }
 
 private:
+    std::vector<uint8_t> session_id_bytes() const {
+        const uint32_t id = current_session_.session_id;
+        return std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(&id),
+                                    reinterpret_cast<const uint8_t*>(&id) + sizeof(id));
+    }
+
     bool perform_handshake() {
         try {
             // Step 1: Send handshake init
@@ -339,12 +339,13 @@ private:
             std::vector<uint8_t> shared_secret = crypto_manager_->perform_dh_key_exchange(
                 dh_keypair_.private_key, server_public_key);
             
-            // Derive session key
+            // Derive session keys
             std::vector<uint8_t> server_nonce(server_handshake.nonce, server_handshake.nonce + SecureComm::IV_SIZE);
-            session_key_ = crypto_manager_->derive_shared_secret(shared_secret, server_nonce);
+            session_keys_ = crypto_manager_->derive_directional_keys(shared_secret, server_nonce, false);
 
             current_session_.shared_secret = shared_secret;
-            current_session_.current_key = session_key_;
+            current_session_.tx_key = session_keys_.tx_key;
+            current_session_.rx_key = session_keys_.rx_key;
             current_session_.authenticated = true;
 
             std::cout << "Session key derived successfully" << std::endl;
@@ -394,7 +395,7 @@ private:
                 std::vector<uint8_t> encrypted_payload(encrypted_msg.encrypted_data, 
                                                       encrypted_msg.encrypted_data + header.payload_size);
                 std::vector<uint8_t> decrypted_data = crypto_manager_->decrypt_aes_gcm(
-                    encrypted_payload, session_key_, iv);
+                    encrypted_payload, session_keys_.rx_key, iv);
 
                 std::string message(decrypted_data.begin(), decrypted_data.end());
                 return message;
