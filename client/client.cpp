@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <vector>
+#include <mutex>
 
 #ifdef _WIN32
     #include <winsock2.h>
@@ -33,6 +34,7 @@ private:
     SecureComm::SessionInfo current_session_;
     SecureComm::SessionKeys session_keys_;
     uint32_t message_counter_;
+    std::mutex key_mutex_;
 
 public:
     SecureClient() : client_socket_(-1), message_counter_(0) {
@@ -177,9 +179,13 @@ public:
         }
     }
 
-    bool request_key_rotation() {
+    // Announces that this peer is rotating the direction it sends on. The frame is
+    // header-only, so it needs no key, and it goes out before the key changes. The
+    // peer rotates its rx key when it reads the frame, so both switch at the same
+    // point in the stream.
+    bool rotate_tx_and_announce() {
         try {
-            SecureComm::MessageHeader header;
+            SecureComm::MessageHeader header{};
             header.version = SecureComm::ProtocolVersion::V1_0;
             header.type = SecureComm::MessageType::KEY_ROTATION;
             header.sequence_number = message_counter_;
@@ -187,35 +193,16 @@ public:
             header.payload_size = 0;
             header.flags = 0;
 
-            std::vector<uint8_t> request_data = SecureComm::serialize_header(header);
-            
-            if (!send_data(request_data)) {
-                std::cerr << "Failed to send key rotation request" << std::endl;
+            if (!send_data(SecureComm::serialize_header(header))) {
+                std::cerr << "Failed to send key rotation marker" << std::endl;
                 return false;
             }
 
-            // Receive key rotation response
-            std::vector<uint8_t> response_data = receive_data();
-            if (response_data.empty()) {
-                std::cerr << "No response to key rotation request" << std::endl;
-                return false;
-            }
-
-            SecureComm::MessageHeader response_header = SecureComm::deserialize_header(response_data);
-            if (response_header.type == SecureComm::MessageType::KEY_ROTATION) {
-                // Rotate both directions to match the server.
-                session_keys_.rx_key = crypto_manager_->rotate_session_key(
-                    session_keys_.rx_key, session_id_bytes());
-                session_keys_.tx_key = crypto_manager_->rotate_session_key(
-                    session_keys_.tx_key, session_id_bytes());
-
-
-                std::cout << "Key rotation completed successfully" << std::endl;
-                return true;
-            } else {
-                std::cerr << "Unexpected response to key rotation request" << std::endl;
-                return false;
-            }
+            std::lock_guard<std::mutex> lock(key_mutex_);
+            session_keys_.tx_key = crypto_manager_->rotate_session_key(
+                session_keys_.tx_key, session_id_bytes());
+            std::cout << "Rotated send key" << std::endl;
+            return true;
 
         } catch (const std::exception& e) {
             std::cerr << "Key rotation failed: " << e.what() << std::endl;
@@ -234,9 +221,7 @@ public:
             if (input == "quit" || input == "exit") {
                 break;
             } else if (input == "rotate") {
-                if (request_key_rotation()) {
-                    std::cout << "Key rotation successful" << std::endl;
-                } else {
+                if (!rotate_tx_and_announce()) {
                     std::cerr << "Key rotation failed" << std::endl;
                 }
             } else if (!input.empty()) {
@@ -377,13 +362,24 @@ private:
 
     std::string receive_encrypted_message() {
         try {
+            // A rotation marker can arrive ahead of the reply we are waiting for, so
+            // apply it and keep reading rather than consuming it in the reply's place.
+            for (;;) {
             std::vector<uint8_t> encrypted_data = receive_data();
             if (encrypted_data.empty()) {
                 return "";
             }
 
             SecureComm::MessageHeader header = SecureComm::deserialize_header(encrypted_data);
-            
+
+            if (header.type == SecureComm::MessageType::KEY_ROTATION) {
+                // The server has rotated the direction it sends on.
+                std::lock_guard<std::mutex> lock(key_mutex_);
+                session_keys_.rx_key = crypto_manager_->rotate_session_key(
+                    session_keys_.rx_key, session_id_bytes());
+                continue;
+            }
+
             if (header.type == SecureComm::MessageType::ENCRYPTED_MESSAGE) {
                 // Extract encrypted message
                 std::vector<uint8_t> payload(encrypted_data.begin() + sizeof(SecureComm::MessageHeader), encrypted_data.end());
@@ -411,6 +407,7 @@ private:
             } else {
                 std::cerr << "Unexpected message type: " << SecureComm::message_type_to_string(header.type) << std::endl;
                 return "";
+            }
             }
 
         } catch (const std::exception& e) {

@@ -342,15 +342,16 @@ private:
 
                     message_counter++;
 
+                    // Rotate the direction this peer sends on, every 10 messages.
+                    if (message_counter % 10 == 0) {
+                        rotate_tx_and_announce(client_socket, session.session_id);
+                        std::cout << "Rotated send key for session " << session.session_id << std::endl;
+                    }
+
                 } else if (header.type == SecureComm::MessageType::KEY_ROTATION) {
-                    // Handle key rotation request. Both directions rotate together here;
-                    // in-band per-direction rotation replaces this next.
+                    // The client has rotated the direction it sends on.
                     session_manager_->rotate_rx_key(session.session_id);
-                    session_manager_->rotate_tx_key(session.session_id);
-                    std::cout << "Key rotation completed for session " << session.session_id << std::endl;
-                    
-                    // Send key rotation confirmation
-                    send_key_rotation_response(client_socket, session);
+                    std::cout << "Client rotated its send key for session " << session.session_id << std::endl;
 
                 } else if (header.type == SecureComm::MessageType::ERROR_MESSAGE) {
                     std::cerr << "Received error message from client" << std::endl;
@@ -413,17 +414,24 @@ private:
         }
     }
 
-    void send_key_rotation_response(int client_socket, const SecureComm::SessionInfo& session) {
-        SecureComm::MessageHeader header;
+    // Announces that this peer is rotating the direction it sends on. The frame is
+    // header-only, so it needs no key, and it goes out before the key changes. The
+    // peer rotates its rx key when it reads the frame, so both switch at the same
+    // point in the stream and neither direction disturbs the other.
+    bool rotate_tx_and_announce(int client_socket, uint32_t session_id) {
+        SecureComm::MessageHeader header{};
         header.version = SecureComm::ProtocolVersion::V1_0;
         header.type = SecureComm::MessageType::KEY_ROTATION;
-        header.sequence_number = session.message_counter;
+        header.sequence_number = 0;
         header.timestamp = SecureComm::get_current_timestamp_seconds();
         header.payload_size = 0;
         header.flags = 0;
 
-        std::vector<uint8_t> response_data = SecureComm::serialize_header(header);
-        send_data(client_socket, response_data);
+        if (!send_data(client_socket, SecureComm::serialize_header(header))) {
+            return false;
+        }
+        session_manager_->rotate_tx_key(session_id);
+        return true;
     }
 
     void send_error(int client_socket, SecureComm::ErrorCode error_code) {
