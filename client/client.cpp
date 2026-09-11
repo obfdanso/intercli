@@ -197,6 +197,12 @@ public:
 
             message_counter_++;
 
+            // Rotate the direction this peer sends on, every 10 messages, matching
+            // what the server does for its own direction.
+            if (message_counter_ % 10 == 0) {
+                rotate_tx_and_announce();
+            }
+
             // Replies arrive on the receive thread, so there is nothing to wait for here.
             return true;
 
