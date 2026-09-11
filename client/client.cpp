@@ -206,10 +206,25 @@ public:
         }
     }
 
-    bool send_encrypted_message(const std::string& message) {
-        SecureComm::ChatMessage chat = SecureComm::make_chat(SecureComm::ChatType::BROADCAST);
-        SecureComm::set_chat_text(chat, message);
-        return send_chat(chat);
+    // Input parsing is a client-side convenience that fills the structured fields.
+    // A leading @ is the shorthand for a direct message; everything else broadcasts.
+    bool send_line(const std::string& line) {
+        if (line.rfind("@", 0) == 0) {
+            const size_t space = line.find(' ');
+            if (space == std::string::npos || space == 1) {
+                std::cout << "Usage: @name message" << std::endl;
+                return true;
+            }
+            SecureComm::ChatMessage msg = SecureComm::make_chat(SecureComm::ChatType::DIRECT);
+            SecureComm::set_chat_field(msg.recipient, SecureComm::MAX_NAME_LEN,
+                                       line.substr(1, space - 1));
+            SecureComm::set_chat_text(msg, line.substr(space + 1));
+            return send_chat(msg);
+        }
+
+        SecureComm::ChatMessage msg = SecureComm::make_chat(SecureComm::ChatType::BROADCAST);
+        SecureComm::set_chat_text(msg, line);
+        return send_chat(msg);
     }
 
     // Prompts until the server accepts a name. The reply arrives on the receive
@@ -297,7 +312,7 @@ public:
                     std::cerr << "Key rotation failed" << std::endl;
                 }
             } else if (!input.empty()) {
-                if (!send_encrypted_message(input)) {
+                if (!send_line(input)) {
                     std::cerr << "Failed to send message" << std::endl;
                     break;
                 }
@@ -329,7 +344,20 @@ private:
             return;
         }
 
-        print_incoming(SecureComm::get_chat_text(msg));
+        const std::string from = SecureComm::get_chat_field(msg.sender, SecureComm::MAX_NAME_LEN);
+        switch (msg.type) {
+            case SecureComm::ChatType::DIRECT:
+                print_incoming("[" + from + " -> you] " + SecureComm::get_chat_text(msg));
+                break;
+            case SecureComm::ChatType::BROADCAST:
+                print_incoming("[" + from + "] " + SecureComm::get_chat_text(msg));
+                break;
+            case SecureComm::ChatType::NOTICE:
+                print_incoming("*** " + SecureComm::get_chat_text(msg) + " ***");
+                break;
+            default:
+                break;
+        }
     }
 
     void dispatch_frame(const std::vector<uint8_t>& data) {

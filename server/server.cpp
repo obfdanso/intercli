@@ -389,10 +389,50 @@ private:
                         continue;
                     }
 
-                    std::cout << "Message from " << conn->name << ": "
-                              << SecureComm::get_chat_text(chat) << std::endl;
-                    send_notice(conn, "Server received: " + SecureComm::get_chat_text(chat));
+                    if (chat.type == SecureComm::ChatType::DIRECT) {
+                        const std::string to =
+                            SecureComm::get_chat_field(chat.recipient, SecureComm::MAX_NAME_LEN);
+                        std::shared_ptr<ClientConnection> target = lookup(to);
+                        if (!target) {
+                            send_notice(conn, "No such user: " + to);
+                            message_counter++;
+                            continue;
+                        }
 
+                        // sender is stamped from the registry, never from the inbound
+                        // envelope, so a client cannot claim to be someone else.
+                        SecureComm::ChatMessage out =
+                            SecureComm::make_chat(SecureComm::ChatType::DIRECT);
+                        SecureComm::set_chat_field(out.sender, SecureComm::MAX_NAME_LEN, conn->name);
+                        SecureComm::set_chat_field(out.recipient, SecureComm::MAX_NAME_LEN, to);
+                        SecureComm::set_chat_text(out, SecureComm::get_chat_text(chat));
+                        send_chat(target, out);
+
+                        std::cout << conn->name << " -> " << to << ": "
+                                  << SecureComm::get_chat_text(chat) << std::endl;
+                        message_counter++;
+                        continue;
+                    }
+
+                    if (chat.type == SecureComm::ChatType::BROADCAST) {
+                        SecureComm::ChatMessage out =
+                            SecureComm::make_chat(SecureComm::ChatType::BROADCAST);
+                        SecureComm::set_chat_field(out.sender, SecureComm::MAX_NAME_LEN, conn->name);
+                        SecureComm::set_chat_text(out, SecureComm::get_chat_text(chat));
+
+                        for (const auto& peer : roster_snapshot()) {
+                            if (peer->name != conn->name) {
+                                send_chat(peer, out);
+                            }
+                        }
+
+                        std::cout << conn->name << " (all): "
+                                  << SecureComm::get_chat_text(chat) << std::endl;
+                        message_counter++;
+                        continue;
+                    }
+
+                    send_notice(conn, "Unsupported message type");
                     message_counter++;
 
                     // Rotate the direction this peer sends on, every 10 messages.
