@@ -372,7 +372,11 @@ private:
 
     void send_encrypted_message(int client_socket, const SecureComm::SessionInfo& session, const std::string& message) {
         try {
-            std::vector<uint8_t> message_data(message.begin(), message.end());
+            // The payload is a ChatMessage envelope, which the client decodes by type.
+            SecureComm::ChatMessage chat = SecureComm::make_chat(SecureComm::ChatType::NOTICE);
+            SecureComm::set_chat_text(chat, message);
+            std::vector<uint8_t> message_data = SecureComm::serialize_chat(chat);
+
             std::vector<uint8_t> key = session_manager_->get_tx_key(session.session_id);
             std::vector<uint8_t> iv = crypto_manager_->generate_random_bytes(SecureComm::IV_SIZE);
             

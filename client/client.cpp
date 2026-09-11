@@ -7,6 +7,8 @@
 #include <chrono>
 #include <vector>
 #include <mutex>
+#include <thread>
+#include <atomic>
 
 #ifdef _WIN32
     #include <winsock2.h>
@@ -35,6 +37,8 @@ private:
     SecureComm::SessionKeys session_keys_;
     uint32_t message_counter_;
     std::mutex key_mutex_;
+    std::thread receive_thread_;
+    std::atomic<bool> connected_{false};
 
 public:
     SecureClient() : client_socket_(-1), message_counter_(0) {
@@ -107,10 +111,28 @@ public:
         }
 
         std::cout << "Secure connection established" << std::endl;
+
+        connected_ = true;
+        receive_thread_ = std::thread(&SecureClient::receive_loop, this);
         return true;
     }
 
     void disconnect() {
+        connected_ = false;
+
+        if (client_socket_ >= 0) {
+            // Unblock the receive thread, which would otherwise sit in recv forever.
+#ifdef _WIN32
+            shutdown(client_socket_, SD_BOTH);
+#else
+            shutdown(client_socket_, SHUT_RDWR);
+#endif
+        }
+
+        if (receive_thread_.joinable()) {
+            receive_thread_.join();
+        }
+
         if (client_socket_ >= 0) {
 #ifdef _WIN32
             closesocket(client_socket_);
@@ -165,12 +187,7 @@ public:
             message_counter_++;
             std::cout << "Sent encrypted message: " << message << std::endl;
 
-            // Receive response
-            std::string response = receive_encrypted_message();
-            if (!response.empty()) {
-                std::cout << "Server response: " << response << std::endl;
-            }
-
+            // Replies arrive on the receive thread, so there is nothing to wait for here.
             return true;
 
         } catch (const std::exception& e) {
@@ -219,6 +236,9 @@ public:
             std::getline(std::cin, input);
             
             if (input == "quit" || input == "exit") {
+                // Replies are asynchronous now, so give any still in flight a moment
+                // to arrive before tearing the socket down.
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
                 break;
             } else if (input == "rotate") {
                 if (!rotate_tx_and_announce()) {
@@ -234,6 +254,76 @@ public:
     }
 
 private:
+    void print_incoming(const std::string& line) {
+        // Redraw the prompt so an arriving message does not corrupt a half-typed line.
+        std::cout << "\r" << line << std::endl << "> " << std::flush;
+    }
+
+    void handle_chat(const SecureComm::ChatMessage& msg) {
+        print_incoming(SecureComm::get_chat_text(msg));
+    }
+
+    void dispatch_frame(const std::vector<uint8_t>& data) {
+        SecureComm::MessageHeader header = SecureComm::deserialize_header(data);
+
+        if (header.type == SecureComm::MessageType::KEY_ROTATION) {
+            // The server has rotated the direction it sends on.
+            std::lock_guard<std::mutex> lock(key_mutex_);
+            session_keys_.rx_key = crypto_manager_->rotate_session_key(
+                session_keys_.rx_key, session_id_bytes());
+            return;
+        }
+
+        if (header.type == SecureComm::MessageType::ERROR_MESSAGE) {
+            std::vector<uint8_t> payload(data.begin() + sizeof(SecureComm::MessageHeader), data.end());
+            if (payload.size() >= sizeof(SecureComm::ErrorCode)) {
+                SecureComm::ErrorCode code = *reinterpret_cast<const SecureComm::ErrorCode*>(payload.data());
+                print_incoming(std::string("*** server error: ") +
+                               SecureComm::error_code_to_string(code) + " ***");
+            }
+            return;
+        }
+
+        if (header.type != SecureComm::MessageType::ENCRYPTED_MESSAGE) {
+            return;
+        }
+
+        std::vector<uint8_t> payload(data.begin() + sizeof(SecureComm::MessageHeader), data.end());
+        SecureComm::EncryptedMessage msg = SecureComm::deserialize_encrypted_message(payload);
+
+        std::vector<uint8_t> rx;
+        {
+            std::lock_guard<std::mutex> lock(key_mutex_);
+            rx = session_keys_.rx_key;
+        }
+
+        std::vector<uint8_t> iv(msg.iv, msg.iv + SecureComm::IV_SIZE);
+        std::vector<uint8_t> cipher(msg.encrypted_data, msg.encrypted_data + header.payload_size);
+        std::vector<uint8_t> plain = crypto_manager_->decrypt_aes_gcm(cipher, rx, iv);
+
+        handle_chat(SecureComm::deserialize_chat(plain));
+    }
+
+    void receive_loop() {
+        while (connected_) {
+            std::vector<uint8_t> data = receive_data();
+            if (data.empty()) {
+                if (connected_) {
+                    connected_ = false;
+                    print_incoming("*** disconnected from server ***");
+                }
+                break;
+            }
+            try {
+                dispatch_frame(data);
+            } catch (const std::exception& e) {
+                connected_ = false;
+                print_incoming(std::string("*** receive error: ") + e.what() + " ***");
+                break;
+            }
+        }
+    }
+
     std::vector<uint8_t> session_id_bytes() const {
         const uint32_t id = current_session_.session_id;
         return std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(&id),
@@ -360,61 +450,6 @@ private:
         }
     }
 
-    std::string receive_encrypted_message() {
-        try {
-            // A rotation marker can arrive ahead of the reply we are waiting for, so
-            // apply it and keep reading rather than consuming it in the reply's place.
-            for (;;) {
-            std::vector<uint8_t> encrypted_data = receive_data();
-            if (encrypted_data.empty()) {
-                return "";
-            }
-
-            SecureComm::MessageHeader header = SecureComm::deserialize_header(encrypted_data);
-
-            if (header.type == SecureComm::MessageType::KEY_ROTATION) {
-                // The server has rotated the direction it sends on.
-                std::lock_guard<std::mutex> lock(key_mutex_);
-                session_keys_.rx_key = crypto_manager_->rotate_session_key(
-                    session_keys_.rx_key, session_id_bytes());
-                continue;
-            }
-
-            if (header.type == SecureComm::MessageType::ENCRYPTED_MESSAGE) {
-                // Extract encrypted message
-                std::vector<uint8_t> payload(encrypted_data.begin() + sizeof(SecureComm::MessageHeader), encrypted_data.end());
-                SecureComm::EncryptedMessage encrypted_msg = SecureComm::deserialize_encrypted_message(payload);
-
-                // Decrypt message
-                std::vector<uint8_t> iv(encrypted_msg.iv, encrypted_msg.iv + SecureComm::IV_SIZE);
-                
-                std::vector<uint8_t> encrypted_payload(encrypted_msg.encrypted_data, 
-                                                      encrypted_msg.encrypted_data + header.payload_size);
-                std::vector<uint8_t> decrypted_data = crypto_manager_->decrypt_aes_gcm(
-                    encrypted_payload, session_keys_.rx_key, iv);
-
-                std::string message(decrypted_data.begin(), decrypted_data.end());
-                return message;
-
-            } else if (header.type == SecureComm::MessageType::ERROR_MESSAGE) {
-                std::vector<uint8_t> payload(encrypted_data.begin() + sizeof(SecureComm::MessageHeader), encrypted_data.end());
-                if (payload.size() >= sizeof(SecureComm::ErrorCode)) {
-                    SecureComm::ErrorCode error_code = *reinterpret_cast<const SecureComm::ErrorCode*>(payload.data());
-                    std::cerr << "Server error: " << SecureComm::error_code_to_string(error_code) << std::endl;
-                }
-                return "";
-
-            } else {
-                std::cerr << "Unexpected message type: " << SecureComm::message_type_to_string(header.type) << std::endl;
-                return "";
-            }
-            }
-
-        } catch (const std::exception& e) {
-            std::cerr << "Error receiving encrypted message: " << e.what() << std::endl;
-            return "";
-        }
-    }
 
     bool receive_all(uint8_t* data, size_t length) {
         size_t total = 0;
