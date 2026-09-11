@@ -209,6 +209,10 @@ public:
     // Input parsing is a client-side convenience that fills the structured fields.
     // A leading @ is the shorthand for a direct message; everything else broadcasts.
     bool send_line(const std::string& line) {
+        if (line == "/who") {
+            return send_chat(SecureComm::make_chat(SecureComm::ChatType::WHO));
+        }
+
         if (line.rfind("@", 0) == 0) {
             const size_t space = line.find(' ');
             if (space == std::string::npos || space == 1) {
@@ -295,7 +299,12 @@ public:
             return;
         }
 
-        std::cout << "\nInteractive mode - Type 'quit' to exit, 'rotate' to rotate keys" << std::endl;
+        std::cout << "\nInteractive mode"
+                  << "\n  @name message  send a direct message"
+                  << "\n  message        send to everyone"
+                  << "\n  /who           list who is online"
+                  << "\n  rotate         rotate your send key"
+                  << "\n  quit           disconnect" << std::endl;
         std::string input;
         
         while (true) {
@@ -353,6 +362,12 @@ private:
                 print_incoming("[" + from + "] " + SecureComm::get_chat_text(msg));
                 break;
             case SecureComm::ChatType::NOTICE:
+                print_incoming("*** " + SecureComm::get_chat_text(msg) + " ***");
+                break;
+            case SecureComm::ChatType::ROSTER:
+                print_incoming(SecureComm::get_chat_text(msg));
+                break;
+            case SecureComm::ChatType::PRESENCE:
                 print_incoming("*** " + SecureComm::get_chat_text(msg) + " ***");
                 break;
             default:

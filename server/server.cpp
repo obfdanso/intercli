@@ -210,7 +210,11 @@ private:
         }
 
         conn->alive = false;
+        const std::string departed = conn->name;
         unregister(conn);
+        if (!departed.empty()) {
+            broadcast_presence(departed, false, std::string());
+        }
 
 #ifdef _WIN32
         closesocket(client_socket);
@@ -378,6 +382,7 @@ private:
                         if (reason.empty()) {
                             std::cout << "Registered " << wanted << " on session "
                                       << session.session_id << std::endl;
+                            broadcast_presence(wanted, true, wanted);
                         }
                         message_counter++;
                         continue;
@@ -428,6 +433,25 @@ private:
 
                         std::cout << conn->name << " (all): "
                                   << SecureComm::get_chat_text(chat) << std::endl;
+                        message_counter++;
+                        continue;
+                    }
+
+                    if (chat.type == SecureComm::ChatType::WHO) {
+                        std::string names;
+                        size_t count = 0;
+                        for (const auto& peer : roster_snapshot()) {
+                            if (!names.empty()) {
+                                names += ", ";
+                            }
+                            names += peer->name;
+                            ++count;
+                        }
+                        SecureComm::ChatMessage reply =
+                            SecureComm::make_chat(SecureComm::ChatType::ROSTER);
+                        SecureComm::set_chat_text(
+                            reply, "Online (" + std::to_string(count) + "): " + names);
+                        send_chat(conn, reply);
                         message_counter++;
                         continue;
                     }
@@ -592,6 +616,18 @@ private:
             }
         } catch (const std::exception&) {
             conn->alive = false;
+        }
+    }
+
+    void broadcast_presence(const std::string& name, bool joined, const std::string& except) {
+        SecureComm::ChatMessage msg = SecureComm::make_chat(SecureComm::ChatType::PRESENCE);
+        SecureComm::set_chat_field(msg.sender, SecureComm::MAX_NAME_LEN, name);
+        SecureComm::set_chat_text(msg, name + (joined ? " joined" : " left"));
+
+        for (const auto& peer : roster_snapshot()) {
+            if (peer->name != except) {
+                send_chat(peer, msg);
+            }
         }
     }
 
