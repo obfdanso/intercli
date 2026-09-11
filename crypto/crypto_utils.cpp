@@ -256,6 +256,30 @@ std::vector<uint8_t> CryptoManager::derive_shared_secret(const std::vector<uint8
     return derive_key(dh_result, salt, KEY_SIZE);
 }
 
+SessionKeys CryptoManager::derive_directional_keys(const std::vector<uint8_t>& shared_secret,
+                                                   const std::vector<uint8_t>& nonce,
+                                                   bool is_server) {
+    // Two distinct salts give two independent keys from one shared secret, so each
+    // direction can be rotated by its own sender without disturbing the other.
+    std::vector<uint8_t> c2s_salt = nonce;
+    c2s_salt.push_back(0x01);
+    std::vector<uint8_t> s2c_salt = nonce;
+    s2c_salt.push_back(0x02);
+
+    std::vector<uint8_t> client_to_server = derive_shared_secret(shared_secret, c2s_salt);
+    std::vector<uint8_t> server_to_client = derive_shared_secret(shared_secret, s2c_salt);
+
+    SessionKeys keys;
+    if (is_server) {
+        keys.tx_key = server_to_client;
+        keys.rx_key = client_to_server;
+    } else {
+        keys.tx_key = client_to_server;
+        keys.rx_key = server_to_client;
+    }
+    return keys;
+}
+
 std::vector<uint8_t> CryptoManager::sha256_hash(const std::vector<uint8_t>& data) {
     EVPMDContext ctx;
     unsigned int hash_len = EVP_MD_size(EVP_sha256());
@@ -590,31 +614,54 @@ AuthResult SessionManager::verify_session_auth(uint32_t session_id, const std::v
     return AuthResult::SUCCESS;
 }
 
-void SessionManager::set_session_key(uint32_t session_id, const std::vector<uint8_t>& key) {
+static std::vector<uint8_t> session_id_to_bytes(uint32_t session_id) {
+    return std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(&session_id),
+                                reinterpret_cast<const uint8_t*>(&session_id) + sizeof(session_id));
+}
+
+void SessionManager::set_session_keys(uint32_t session_id, const SessionKeys& keys) {
     std::lock_guard<std::mutex> lock(sessions_mutex_);
     auto it = sessions_.find(session_id);
     if (it != sessions_.end()) {
-        it->second.current_key = key;
+        it->second.tx_key = keys.tx_key;
+        it->second.rx_key = keys.rx_key;
     }
 }
 
-std::vector<uint8_t> SessionManager::get_session_key(uint32_t session_id) {
+std::vector<uint8_t> SessionManager::get_tx_key(uint32_t session_id) {
     std::lock_guard<std::mutex> lock(sessions_mutex_);
     auto it = sessions_.find(session_id);
     if (it == sessions_.end()) {
         throw CryptoException("Session not found: " + std::to_string(session_id));
     }
-    return it->second.current_key;
+    return it->second.tx_key;
 }
 
-void SessionManager::rotate_session_key(uint32_t session_id) {
+std::vector<uint8_t> SessionManager::get_rx_key(uint32_t session_id) {
+    std::lock_guard<std::mutex> lock(sessions_mutex_);
+    auto it = sessions_.find(session_id);
+    if (it == sessions_.end()) {
+        throw CryptoException("Session not found: " + std::to_string(session_id));
+    }
+    return it->second.rx_key;
+}
+
+void SessionManager::rotate_tx_key(uint32_t session_id) {
     std::lock_guard<std::mutex> lock(sessions_mutex_);
     auto it = sessions_.find(session_id);
     if (it != sessions_.end()) {
-        it->second.current_key = crypto_manager_.rotate_session_key(it->second.current_key, 
-                                                                   std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(&session_id), 
-                                                                                       reinterpret_cast<const uint8_t*>(&session_id) + sizeof(session_id)));
+        it->second.tx_key = crypto_manager_.rotate_session_key(it->second.tx_key,
+                                                               session_id_to_bytes(session_id));
         it->second.key_rotated = true;
+    }
+}
+
+void SessionManager::rotate_rx_key(uint32_t session_id) {
+    std::lock_guard<std::mutex> lock(sessions_mutex_);
+    auto it = sessions_.find(session_id);
+    if (it != sessions_.end()) {
+        it->second.rx_key = crypto_manager_.rotate_session_key(it->second.rx_key,
+                                                               session_id_to_bytes(session_id));
     }
 }
 

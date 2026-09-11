@@ -129,6 +129,43 @@ target_link_libraries(test_aes_gcm
 
 add_test(NAME aes_gcm COMMAND test_aes_gcm)
 
+add_executable(test_chat_envelope
+    tests/test_chat_envelope.cpp
+)
+
+target_include_directories(test_chat_envelope PRIVATE include crypto)
+target_link_libraries(test_chat_envelope
+    crypto_lib
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    Threads::Threads
+)
+
+add_test(NAME chat_envelope COMMAND test_chat_envelope)
+
+add_executable(test_directional_keys
+    tests/test_directional_keys.cpp
+)
+
+target_include_directories(test_directional_keys PRIVATE include crypto)
+target_link_libraries(test_directional_keys
+    crypto_lib
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    Threads::Threads
+)
+
+add_test(NAME directional_keys COMMAND test_directional_keys)
+
+# Drives three real clients through pipes. Needs bash; skipped where absent.
+find_program(BASH_PROGRAM bash)
+if(BASH_PROGRAM)
+    add_test(NAME chat_integration
+             COMMAND ${BASH_PROGRAM} ${CMAKE_SOURCE_DIR}/tests/integration_chat.sh
+                     $<TARGET_FILE_DIR:server>)
+    set_tests_properties(chat_integration PROPERTIES TIMEOUT 180)
+endif()
+
 # Set compiler flags and platform-specific settings
 if(MSVC)
     target_compile_options(server PRIVATE /W4)

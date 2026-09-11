@@ -6,6 +6,10 @@
 #include <algorithm>
 #include <chrono>
 #include <vector>
+#include <mutex>
+#include <thread>
+#include <atomic>
+#include <condition_variable>
 
 #ifdef _WIN32
     #include <winsock2.h>
@@ -31,8 +35,16 @@ private:
     SecureComm::KeyPair client_keypair_;
     SecureComm::KeyPair dh_keypair_;
     SecureComm::SessionInfo current_session_;
-    std::vector<uint8_t> session_key_;
+    SecureComm::SessionKeys session_keys_;
     uint32_t message_counter_;
+    std::mutex key_mutex_;
+    std::thread receive_thread_;
+    std::atomic<bool> connected_{false};
+    std::mutex register_mutex_;
+    std::condition_variable register_cv_;
+    bool register_answered_ = false;
+    bool register_ok_ = false;
+    std::string my_name_;
 
 public:
     SecureClient() : client_socket_(-1), message_counter_(0) {
@@ -105,10 +117,28 @@ public:
         }
 
         std::cout << "Secure connection established" << std::endl;
+
+        connected_ = true;
+        receive_thread_ = std::thread(&SecureClient::receive_loop, this);
         return true;
     }
 
     void disconnect() {
+        connected_ = false;
+
+        if (client_socket_ >= 0) {
+            // Unblock the receive thread, which would otherwise sit in recv forever.
+#ifdef _WIN32
+            shutdown(client_socket_, SD_BOTH);
+#else
+            shutdown(client_socket_, SHUT_RDWR);
+#endif
+        }
+
+        if (receive_thread_.joinable()) {
+            receive_thread_.join();
+        }
+
         if (client_socket_ >= 0) {
 #ifdef _WIN32
             closesocket(client_socket_);
@@ -119,13 +149,18 @@ public:
         }
     }
 
-    bool send_encrypted_message(const std::string& message) {
+    bool send_chat(const SecureComm::ChatMessage& chat) {
         try {
-            std::vector<uint8_t> message_data(message.begin(), message.end());
+            std::vector<uint8_t> message_data = SecureComm::serialize_chat(chat);
             std::vector<uint8_t> iv = crypto_manager_->generate_random_bytes(SecureComm::IV_SIZE);
-            
-            std::vector<uint8_t> encrypted_data = crypto_manager_->encrypt_aes_gcm(message_data, session_key_, iv);
-            
+
+            std::vector<uint8_t> tx;
+            {
+                std::lock_guard<std::mutex> lock(key_mutex_);
+                tx = session_keys_.tx_key;
+            }
+            std::vector<uint8_t> encrypted_data = crypto_manager_->encrypt_aes_gcm(message_data, tx, iv);
+
             SecureComm::EncryptedMessage encrypted_msg{};
             encrypted_msg.session_id = current_session_.session_id;
             encrypted_msg.message_id = message_counter_;
@@ -161,22 +196,14 @@ public:
             }
 
             message_counter_++;
-            std::cout << "Sent encrypted message: " << message << std::endl;
 
-            // Receive response
-            std::string response = receive_encrypted_message();
-            if (!response.empty()) {
-                std::cout << "Server response: " << response << std::endl;
-            }
-
-            // The server rotates unprompted every 10 messages, so mirror its schedule
-            // here. Both sides count the same exchanges and derive the same key.
+            // Rotate the direction this peer sends on, every 10 messages, matching
+            // what the server does for its own direction.
             if (message_counter_ % 10 == 0) {
-                session_key_ = crypto_manager_->rotate_session_key(session_key_,
-                    std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(&current_session_.session_id),
-                                        reinterpret_cast<const uint8_t*>(&current_session_.session_id) + sizeof(current_session_.session_id)));
+                rotate_tx_and_announce();
             }
 
+            // Replies arrive on the receive thread, so there is nothing to wait for here.
             return true;
 
         } catch (const std::exception& e) {
@@ -185,9 +212,69 @@ public:
         }
     }
 
-    bool request_key_rotation() {
+    // Input parsing is a client-side convenience that fills the structured fields.
+    // A leading @ is the shorthand for a direct message; everything else broadcasts.
+    bool send_line(const std::string& line) {
+        if (line == "/who") {
+            return send_chat(SecureComm::make_chat(SecureComm::ChatType::WHO));
+        }
+
+        if (line.rfind("@", 0) == 0) {
+            const size_t space = line.find(' ');
+            if (space == std::string::npos || space == 1) {
+                std::cout << "Usage: @name message" << std::endl;
+                return true;
+            }
+            SecureComm::ChatMessage msg = SecureComm::make_chat(SecureComm::ChatType::DIRECT);
+            SecureComm::set_chat_field(msg.recipient, SecureComm::MAX_NAME_LEN,
+                                       line.substr(1, space - 1));
+            SecureComm::set_chat_text(msg, line.substr(space + 1));
+            return send_chat(msg);
+        }
+
+        SecureComm::ChatMessage msg = SecureComm::make_chat(SecureComm::ChatType::BROADCAST);
+        SecureComm::set_chat_text(msg, line);
+        return send_chat(msg);
+    }
+
+    // Prompts until the server accepts a name. The reply arrives on the receive
+    // thread, so the prompt waits on a condition variable rather than reading the
+    // socket itself.
+    bool register_name() {
+        std::string name;
+        while (connected_) {
+            std::cout << "Enter your name: " << std::flush;
+            if (!std::getline(std::cin, name)) {
+                return false;
+            }
+
+            SecureComm::ChatMessage msg = SecureComm::make_chat(SecureComm::ChatType::REGISTER);
+            SecureComm::set_chat_text(msg, name);
+            if (!send_chat(msg)) {
+                return false;
+            }
+
+            std::unique_lock<std::mutex> lock(register_mutex_);
+            register_cv_.wait(lock, [this] { return register_answered_ || !connected_; });
+            if (!connected_) {
+                return false;
+            }
+            register_answered_ = false;
+            if (register_ok_) {
+                my_name_ = name;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Announces that this peer is rotating the direction it sends on. The frame is
+    // header-only, so it needs no key, and it goes out before the key changes. The
+    // peer rotates its rx key when it reads the frame, so both switch at the same
+    // point in the stream.
+    bool rotate_tx_and_announce() {
         try {
-            SecureComm::MessageHeader header;
+            SecureComm::MessageHeader header{};
             header.version = SecureComm::ProtocolVersion::V1_0;
             header.type = SecureComm::MessageType::KEY_ROTATION;
             header.sequence_number = message_counter_;
@@ -195,33 +282,16 @@ public:
             header.payload_size = 0;
             header.flags = 0;
 
-            std::vector<uint8_t> request_data = SecureComm::serialize_header(header);
-            
-            if (!send_data(request_data)) {
-                std::cerr << "Failed to send key rotation request" << std::endl;
+            if (!send_data(SecureComm::serialize_header(header))) {
+                std::cerr << "Failed to send key rotation marker" << std::endl;
                 return false;
             }
 
-            // Receive key rotation response
-            std::vector<uint8_t> response_data = receive_data();
-            if (response_data.empty()) {
-                std::cerr << "No response to key rotation request" << std::endl;
-                return false;
-            }
-
-            SecureComm::MessageHeader response_header = SecureComm::deserialize_header(response_data);
-            if (response_header.type == SecureComm::MessageType::KEY_ROTATION) {
-                // Update session key
-                session_key_ = crypto_manager_->rotate_session_key(session_key_, 
-                    std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(&current_session_.session_id), 
-                                        reinterpret_cast<const uint8_t*>(&current_session_.session_id) + sizeof(current_session_.session_id)));
-                
-                std::cout << "Key rotation completed successfully" << std::endl;
-                return true;
-            } else {
-                std::cerr << "Unexpected response to key rotation request" << std::endl;
-                return false;
-            }
+            std::lock_guard<std::mutex> lock(key_mutex_);
+            session_keys_.tx_key = crypto_manager_->rotate_session_key(
+                session_keys_.tx_key, session_id_bytes());
+            std::cout << "Rotated send key" << std::endl;
+            return true;
 
         } catch (const std::exception& e) {
             std::cerr << "Key rotation failed: " << e.what() << std::endl;
@@ -230,7 +300,17 @@ public:
     }
 
     void interactive_mode() {
-        std::cout << "\nInteractive mode - Type 'quit' to exit, 'rotate' to rotate keys" << std::endl;
+        if (!register_name()) {
+            std::cerr << "Registration failed" << std::endl;
+            return;
+        }
+
+        std::cout << "\nInteractive mode"
+                  << "\n  @name message  send a direct message"
+                  << "\n  message        send to everyone"
+                  << "\n  /who           list who is online"
+                  << "\n  rotate         rotate your send key"
+                  << "\n  quit           disconnect" << std::endl;
         std::string input;
         
         while (true) {
@@ -238,15 +318,16 @@ public:
             std::getline(std::cin, input);
             
             if (input == "quit" || input == "exit") {
+                // Replies are asynchronous now, so give any still in flight a moment
+                // to arrive before tearing the socket down.
+                std::this_thread::sleep_for(std::chrono::milliseconds(300));
                 break;
             } else if (input == "rotate") {
-                if (request_key_rotation()) {
-                    std::cout << "Key rotation successful" << std::endl;
-                } else {
+                if (!rotate_tx_and_announce()) {
                     std::cerr << "Key rotation failed" << std::endl;
                 }
             } else if (!input.empty()) {
-                if (!send_encrypted_message(input)) {
+                if (!send_line(input)) {
                     std::cerr << "Failed to send message" << std::endl;
                     break;
                 }
@@ -255,6 +336,120 @@ public:
     }
 
 private:
+    void print_incoming(const std::string& line) {
+        // Redraw the prompt so an arriving message does not corrupt a half-typed line.
+        std::cout << "\r" << line << std::endl << "> " << std::flush;
+    }
+
+    void handle_chat(const SecureComm::ChatMessage& msg) {
+        if (msg.type == SecureComm::ChatType::REGISTER_OK ||
+            msg.type == SecureComm::ChatType::REGISTER_FAIL) {
+            const bool ok = (msg.type == SecureComm::ChatType::REGISTER_OK);
+            if (ok) {
+                std::cout << "Registered as " << SecureComm::get_chat_text(msg) << std::endl;
+            } else {
+                std::cout << SecureComm::get_chat_text(msg) << std::endl;
+            }
+            {
+                std::lock_guard<std::mutex> lock(register_mutex_);
+                register_ok_ = ok;
+                register_answered_ = true;
+            }
+            register_cv_.notify_one();
+            return;
+        }
+
+        const std::string from = SecureComm::get_chat_field(msg.sender, SecureComm::MAX_NAME_LEN);
+        switch (msg.type) {
+            case SecureComm::ChatType::DIRECT:
+                print_incoming("[" + from + " -> you] " + SecureComm::get_chat_text(msg));
+                break;
+            case SecureComm::ChatType::BROADCAST:
+                print_incoming("[" + from + "] " + SecureComm::get_chat_text(msg));
+                break;
+            case SecureComm::ChatType::NOTICE:
+                print_incoming("*** " + SecureComm::get_chat_text(msg) + " ***");
+                break;
+            case SecureComm::ChatType::ROSTER:
+                print_incoming(SecureComm::get_chat_text(msg));
+                break;
+            case SecureComm::ChatType::PRESENCE:
+                print_incoming("*** " + SecureComm::get_chat_text(msg) + " ***");
+                break;
+            default:
+                break;
+        }
+    }
+
+    void dispatch_frame(const std::vector<uint8_t>& data) {
+        SecureComm::MessageHeader header = SecureComm::deserialize_header(data);
+
+        if (header.type == SecureComm::MessageType::KEY_ROTATION) {
+            // The server has rotated the direction it sends on.
+            std::lock_guard<std::mutex> lock(key_mutex_);
+            session_keys_.rx_key = crypto_manager_->rotate_session_key(
+                session_keys_.rx_key, session_id_bytes());
+            return;
+        }
+
+        if (header.type == SecureComm::MessageType::ERROR_MESSAGE) {
+            std::vector<uint8_t> payload(data.begin() + sizeof(SecureComm::MessageHeader), data.end());
+            if (payload.size() >= sizeof(SecureComm::ErrorCode)) {
+                SecureComm::ErrorCode code = *reinterpret_cast<const SecureComm::ErrorCode*>(payload.data());
+                print_incoming(std::string("*** server error: ") +
+                               SecureComm::error_code_to_string(code) + " ***");
+            }
+            return;
+        }
+
+        if (header.type != SecureComm::MessageType::ENCRYPTED_MESSAGE) {
+            return;
+        }
+
+        std::vector<uint8_t> payload(data.begin() + sizeof(SecureComm::MessageHeader), data.end());
+        SecureComm::EncryptedMessage msg = SecureComm::deserialize_encrypted_message(payload);
+
+        std::vector<uint8_t> rx;
+        {
+            std::lock_guard<std::mutex> lock(key_mutex_);
+            rx = session_keys_.rx_key;
+        }
+
+        std::vector<uint8_t> iv(msg.iv, msg.iv + SecureComm::IV_SIZE);
+        std::vector<uint8_t> cipher(msg.encrypted_data, msg.encrypted_data + header.payload_size);
+        std::vector<uint8_t> plain = crypto_manager_->decrypt_aes_gcm(cipher, rx, iv);
+
+        handle_chat(SecureComm::deserialize_chat(plain));
+    }
+
+    void receive_loop() {
+        while (connected_) {
+            std::vector<uint8_t> data = receive_data();
+            if (data.empty()) {
+                if (connected_) {
+                    connected_ = false;
+                    print_incoming("*** disconnected from server ***");
+                }
+                register_cv_.notify_all();
+                break;
+            }
+            try {
+                dispatch_frame(data);
+            } catch (const std::exception& e) {
+                connected_ = false;
+                print_incoming(std::string("*** receive error: ") + e.what() + " ***");
+                register_cv_.notify_all();
+                break;
+            }
+        }
+    }
+
+    std::vector<uint8_t> session_id_bytes() const {
+        const uint32_t id = current_session_.session_id;
+        return std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(&id),
+                                    reinterpret_cast<const uint8_t*>(&id) + sizeof(id));
+    }
+
     bool perform_handshake() {
         try {
             // Step 1: Send handshake init
@@ -339,12 +534,13 @@ private:
             std::vector<uint8_t> shared_secret = crypto_manager_->perform_dh_key_exchange(
                 dh_keypair_.private_key, server_public_key);
             
-            // Derive session key
+            // Derive session keys
             std::vector<uint8_t> server_nonce(server_handshake.nonce, server_handshake.nonce + SecureComm::IV_SIZE);
-            session_key_ = crypto_manager_->derive_shared_secret(shared_secret, server_nonce);
+            session_keys_ = crypto_manager_->derive_directional_keys(shared_secret, server_nonce, false);
 
             current_session_.shared_secret = shared_secret;
-            current_session_.current_key = session_key_;
+            current_session_.tx_key = session_keys_.tx_key;
+            current_session_.rx_key = session_keys_.rx_key;
             current_session_.authenticated = true;
 
             std::cout << "Session key derived successfully" << std::endl;
@@ -374,49 +570,6 @@ private:
         }
     }
 
-    std::string receive_encrypted_message() {
-        try {
-            std::vector<uint8_t> encrypted_data = receive_data();
-            if (encrypted_data.empty()) {
-                return "";
-            }
-
-            SecureComm::MessageHeader header = SecureComm::deserialize_header(encrypted_data);
-            
-            if (header.type == SecureComm::MessageType::ENCRYPTED_MESSAGE) {
-                // Extract encrypted message
-                std::vector<uint8_t> payload(encrypted_data.begin() + sizeof(SecureComm::MessageHeader), encrypted_data.end());
-                SecureComm::EncryptedMessage encrypted_msg = SecureComm::deserialize_encrypted_message(payload);
-
-                // Decrypt message
-                std::vector<uint8_t> iv(encrypted_msg.iv, encrypted_msg.iv + SecureComm::IV_SIZE);
-                
-                std::vector<uint8_t> encrypted_payload(encrypted_msg.encrypted_data, 
-                                                      encrypted_msg.encrypted_data + header.payload_size);
-                std::vector<uint8_t> decrypted_data = crypto_manager_->decrypt_aes_gcm(
-                    encrypted_payload, session_key_, iv);
-
-                std::string message(decrypted_data.begin(), decrypted_data.end());
-                return message;
-
-            } else if (header.type == SecureComm::MessageType::ERROR_MESSAGE) {
-                std::vector<uint8_t> payload(encrypted_data.begin() + sizeof(SecureComm::MessageHeader), encrypted_data.end());
-                if (payload.size() >= sizeof(SecureComm::ErrorCode)) {
-                    SecureComm::ErrorCode error_code = *reinterpret_cast<const SecureComm::ErrorCode*>(payload.data());
-                    std::cerr << "Server error: " << SecureComm::error_code_to_string(error_code) << std::endl;
-                }
-                return "";
-
-            } else {
-                std::cerr << "Unexpected message type: " << SecureComm::message_type_to_string(header.type) << std::endl;
-                return "";
-            }
-
-        } catch (const std::exception& e) {
-            std::cerr << "Error receiving encrypted message: " << e.what() << std::endl;
-            return "";
-        }
-    }
 
     bool receive_all(uint8_t* data, size_t length) {
         size_t total = 0;

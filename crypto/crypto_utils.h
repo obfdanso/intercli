@@ -47,6 +47,13 @@ private:
     EVP_MD_CTX* ctx_;
 };
 
+// A session's two keys. Each peer encrypts with tx_key and decrypts with rx_key;
+// the roles are mirrored, so one peer's tx_key is the other's rx_key.
+struct SessionKeys {
+    std::vector<uint8_t> tx_key;
+    std::vector<uint8_t> rx_key;
+};
+
 // Main cryptographic manager class
 class CryptoManager {
 public:
@@ -71,6 +78,9 @@ public:
                                                 const std::vector<uint8_t>& peer_public_key);
     std::vector<uint8_t> derive_shared_secret(const std::vector<uint8_t>& dh_result,
                                              const std::vector<uint8_t>& salt);
+    SessionKeys derive_directional_keys(const std::vector<uint8_t>& shared_secret,
+                                       const std::vector<uint8_t>& nonce,
+                                       bool is_server);
     
     // Hashing and HMAC
     std::vector<uint8_t> sha256_hash(const std::vector<uint8_t>& data);
@@ -155,9 +165,11 @@ public:
     AuthResult verify_session_auth(uint32_t session_id, const std::vector<uint8_t>& signature);
     
     // Session key management
-    void set_session_key(uint32_t session_id, const std::vector<uint8_t>& key);
-    std::vector<uint8_t> get_session_key(uint32_t session_id);
-    void rotate_session_key(uint32_t session_id);
+    void set_session_keys(uint32_t session_id, const SessionKeys& keys);
+    std::vector<uint8_t> get_tx_key(uint32_t session_id);
+    std::vector<uint8_t> get_rx_key(uint32_t session_id);
+    void rotate_tx_key(uint32_t session_id);
+    void rotate_rx_key(uint32_t session_id);
     
     // Session cleanup
     void cleanup_expired_sessions(std::chrono::seconds max_age = std::chrono::hours(24));

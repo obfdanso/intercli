@@ -140,29 +140,61 @@ The server will:
 ./client 127.0.0.1 8080
 ```
 
+### Registering a name
+
+After the handshake the client asks for a name, which is how other clients
+address you. Names are 1 to 31 printable characters with no spaces. If the name
+is already taken the server refuses it and you are asked again.
+
+```
+Enter your name: alice
+Registered as alice
+```
+
 ### Interactive Client Commands
 
-Once connected, the client provides an interactive interface:
+| Input | Effect |
+|---|---|
+| `@bob hello` | Direct message to bob |
+| `hello` | Broadcast to everyone else online |
+| `/who` | List who is currently online |
+| `rotate` | Rotate your send key |
+| `quit` | Disconnect |
 
-- **Send message**: Type any text and press Enter
-- **Rotate keys**: Type `rotate` to manually rotate session keys
-- **Quit**: Type `quit` or `exit` to disconnect
+Your send key also rotates automatically after every 10 messages you send, as
+does the server's.
+
+Because input starting with `@` is read as a direct message, a broadcast cannot
+begin with `@`. The protocol itself is unambiguous; this is only a property of
+the typing shorthand.
 
 **Example session:**
 ```
-> Hello, this is a secret message!
-Sent encrypted message: Hello, this is a secret message!
-Server response: Server received: Hello, this is a secret message!
+Enter your name: bob
+Registered as bob
 
-> rotate
-Key rotation successful
+> /who
+Online (3): alice, bob, carol
 
-> Another encrypted message
-Sent encrypted message: Another encrypted message
-Server response: Server received: Another encrypted message
+> hello everyone
+> @alice just for you
 
+> *** carol left ***
 > quit
 ```
+
+Meanwhile on alice's screen:
+```
+*** bob joined ***
+[bob] hello everyone
+[bob -> you] just for you
+```
+
+### Who can read your messages
+
+The server decrypts every message in order to route it, so it can read all
+relayed traffic. Encryption protects messages from a network observer, not from
+the server operator. End-to-end encryption between clients is not implemented.
 
 ## 🔐 Security Protocol Details
 

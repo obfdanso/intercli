@@ -21,6 +21,20 @@
 
 #include <cstring>
 #include <signal.h>
+#include <map>
+#include <mutex>
+#include <string>
+
+// One connected client. Held by shared_ptr because a relaying thread may be
+// mid-send to a client that is disconnecting; the object outlives the registry
+// entry until the last reference drops, and alive makes late sends no-ops.
+struct ClientConnection {
+    int               socket = -1;
+    uint32_t          session_id = 0;
+    std::string       name;
+    std::mutex        send_mutex;
+    std::atomic<bool> alive{true};
+};
 
 // using namespace SecureComm; // Removed to avoid namespace conflicts
 
@@ -32,6 +46,8 @@ private:
     std::unique_ptr<SecureComm::SessionManager> session_manager_;
     std::unique_ptr<SecureComm::KeyManager> key_manager_;
     std::vector<std::thread> client_threads_;
+    std::map<std::string, std::shared_ptr<ClientConnection>> registry_;
+    std::mutex registry_mutex_;
     SecureComm::KeyPair server_keypair_;
 
 public:
@@ -163,10 +179,14 @@ public:
 
 private:
     void handle_client(int client_socket) {
+        auto conn = std::make_shared<ClientConnection>();
+        conn->socket = client_socket;
+
         try {
             uint32_t client_id = SecureComm::generate_client_id();
             SecureComm::SessionInfo session = session_manager_->create_session(client_id);
-            
+            conn->session_id = session.session_id;
+
             std::cout << "Created session " << session.session_id << " for client " << client_id << std::endl;
 
             // Perform secure handshake
@@ -183,10 +203,17 @@ private:
             std::cout << "Handshake completed successfully for client " << client_id << std::endl;
 
             // Handle encrypted messages
-            handle_encrypted_messages(client_socket, session);
+            handle_encrypted_messages(conn, session);
 
         } catch (const std::exception& e) {
             std::cerr << "Error handling client: " << e.what() << std::endl;
+        }
+
+        conn->alive = false;
+        const std::string departed = conn->name;
+        unregister(conn);
+        if (!departed.empty()) {
+            broadcast_presence(departed, false, std::string());
         }
 
 #ifdef _WIN32
@@ -230,13 +257,14 @@ private:
             
             // Derive session key
             std::vector<uint8_t> client_nonce_vec(client_handshake.nonce, client_handshake.nonce + SecureComm::IV_SIZE);
-            std::vector<uint8_t> session_key = crypto_manager_->derive_shared_secret(
-                shared_secret, client_nonce_vec);
+            SecureComm::SessionKeys keys = crypto_manager_->derive_directional_keys(
+                shared_secret, client_nonce_vec, true);
 
-            // Store session key
-            session_manager_->set_session_key(session.session_id, session_key);
+            // Store session keys
+            session_manager_->set_session_keys(session.session_id, keys);
             session.shared_secret = shared_secret;
-            session.current_key = session_key;
+            session.tx_key = keys.tx_key;
+            session.rx_key = keys.rx_key;
 
             // Step 4: Send handshake response
             SecureComm::HandshakeMessage server_handshake{};
@@ -294,9 +322,11 @@ private:
         }
     }
 
-    void handle_encrypted_messages(int client_socket, SecureComm::SessionInfo& session) {
+    void handle_encrypted_messages(const std::shared_ptr<ClientConnection>& conn,
+                                   SecureComm::SessionInfo& session) {
+        const int client_socket = conn->socket;
         uint32_t message_counter = 0;
-        
+
         while (running_) {
             try {
                 std::vector<uint8_t> encrypted_data = receive_data(client_socket);
@@ -322,7 +352,7 @@ private:
                     }
 
                     // Decrypt message
-                    std::vector<uint8_t> key = session_manager_->get_session_key(session.session_id);
+                    std::vector<uint8_t> key = session_manager_->get_rx_key(session.session_id);
                     std::vector<uint8_t> iv(encrypted_msg.iv, encrypted_msg.iv + SecureComm::IV_SIZE);
                     
                     std::vector<uint8_t> decrypted_data = crypto_manager_->decrypt_aes_gcm(
@@ -330,30 +360,115 @@ private:
                                            encrypted_msg.encrypted_data + header.payload_size),
                         key, iv);
 
-                    // Process message
-                    std::string message(decrypted_data.begin(), decrypted_data.end());
-                    std::cout << "Received encrypted message from client " << session.client_id 
-                              << ": " << message << std::endl;
+                    SecureComm::ChatMessage chat = SecureComm::deserialize_chat(decrypted_data);
 
-                    // Send response
-                    std::string response = "Server received: " + message;
-                    send_encrypted_message(client_socket, session, response);
+                    if (chat.type == SecureComm::ChatType::REGISTER) {
+                        const std::string wanted = SecureComm::get_chat_text(chat);
+                        std::string reason;
+                        if (!SecureComm::is_valid_name(wanted)) {
+                            reason = "Name must be 1-31 printable characters with no spaces";
+                        } else if (!conn->name.empty()) {
+                            reason = "Already registered as " + conn->name;
+                        } else if (!register_name(wanted, conn)) {
+                            reason = "That name is taken";
+                        }
 
+                        SecureComm::ChatMessage reply = SecureComm::make_chat(
+                            reason.empty() ? SecureComm::ChatType::REGISTER_OK
+                                           : SecureComm::ChatType::REGISTER_FAIL);
+                        SecureComm::set_chat_text(reply, reason.empty() ? wanted : reason);
+                        send_chat(conn, reply);
+
+                        if (reason.empty()) {
+                            std::cout << "Registered " << wanted << " on session "
+                                      << session.session_id << std::endl;
+                            broadcast_presence(wanted, true, wanted);
+                        }
+                        message_counter++;
+                        continue;
+                    }
+
+                    if (conn->name.empty()) {
+                        send_notice(conn, "Register a name before sending messages");
+                        message_counter++;
+                        continue;
+                    }
+
+                    if (chat.type == SecureComm::ChatType::DIRECT) {
+                        const std::string to =
+                            SecureComm::get_chat_field(chat.recipient, SecureComm::MAX_NAME_LEN);
+                        std::shared_ptr<ClientConnection> target = lookup(to);
+                        if (!target) {
+                            send_notice(conn, "No such user: " + to);
+                            message_counter++;
+                            continue;
+                        }
+
+                        // sender is stamped from the registry, never from the inbound
+                        // envelope, so a client cannot claim to be someone else.
+                        SecureComm::ChatMessage out =
+                            SecureComm::make_chat(SecureComm::ChatType::DIRECT);
+                        SecureComm::set_chat_field(out.sender, SecureComm::MAX_NAME_LEN, conn->name);
+                        SecureComm::set_chat_field(out.recipient, SecureComm::MAX_NAME_LEN, to);
+                        SecureComm::set_chat_text(out, SecureComm::get_chat_text(chat));
+                        send_chat(target, out);
+
+                        std::cout << conn->name << " -> " << to << ": "
+                                  << SecureComm::get_chat_text(chat) << std::endl;
+                        message_counter++;
+                        continue;
+                    }
+
+                    if (chat.type == SecureComm::ChatType::BROADCAST) {
+                        SecureComm::ChatMessage out =
+                            SecureComm::make_chat(SecureComm::ChatType::BROADCAST);
+                        SecureComm::set_chat_field(out.sender, SecureComm::MAX_NAME_LEN, conn->name);
+                        SecureComm::set_chat_text(out, SecureComm::get_chat_text(chat));
+
+                        for (const auto& peer : roster_snapshot()) {
+                            if (peer->name != conn->name) {
+                                send_chat(peer, out);
+                            }
+                        }
+
+                        std::cout << conn->name << " (all): "
+                                  << SecureComm::get_chat_text(chat) << std::endl;
+                        message_counter++;
+                        continue;
+                    }
+
+                    if (chat.type == SecureComm::ChatType::WHO) {
+                        std::string names;
+                        size_t count = 0;
+                        for (const auto& peer : roster_snapshot()) {
+                            if (!names.empty()) {
+                                names += ", ";
+                            }
+                            names += peer->name;
+                            ++count;
+                        }
+                        SecureComm::ChatMessage reply =
+                            SecureComm::make_chat(SecureComm::ChatType::ROSTER);
+                        SecureComm::set_chat_text(
+                            reply, "Online (" + std::to_string(count) + "): " + names);
+                        send_chat(conn, reply);
+                        message_counter++;
+                        continue;
+                    }
+
+                    send_notice(conn, "Unsupported message type");
                     message_counter++;
-                    
-                    // Rotate key every 10 messages for forward secrecy
+
+                    // Rotate the direction this peer sends on, every 10 messages.
                     if (message_counter % 10 == 0) {
-                        session_manager_->rotate_session_key(session.session_id);
-                        std::cout << "Key rotated for session " << session.session_id << std::endl;
+                        rotate_tx_and_announce(client_socket, session.session_id);
+                        std::cout << "Rotated send key for session " << session.session_id << std::endl;
                     }
 
                 } else if (header.type == SecureComm::MessageType::KEY_ROTATION) {
-                    // Handle key rotation request
-                    session_manager_->rotate_session_key(session.session_id);
-                    std::cout << "Key rotation completed for session " << session.session_id << std::endl;
-                    
-                    // Send key rotation confirmation
-                    send_key_rotation_response(client_socket, session);
+                    // The client has rotated the direction it sends on.
+                    session_manager_->rotate_rx_key(session.session_id);
+                    std::cout << "Client rotated its send key for session " << session.session_id << std::endl;
 
                 } else if (header.type == SecureComm::MessageType::ERROR_MESSAGE) {
                     std::cerr << "Received error message from client" << std::endl;
@@ -374,8 +489,12 @@ private:
 
     void send_encrypted_message(int client_socket, const SecureComm::SessionInfo& session, const std::string& message) {
         try {
-            std::vector<uint8_t> message_data(message.begin(), message.end());
-            std::vector<uint8_t> key = session_manager_->get_session_key(session.session_id);
+            // The payload is a ChatMessage envelope, which the client decodes by type.
+            SecureComm::ChatMessage chat = SecureComm::make_chat(SecureComm::ChatType::NOTICE);
+            SecureComm::set_chat_text(chat, message);
+            std::vector<uint8_t> message_data = SecureComm::serialize_chat(chat);
+
+            std::vector<uint8_t> key = session_manager_->get_tx_key(session.session_id);
             std::vector<uint8_t> iv = crypto_manager_->generate_random_bytes(SecureComm::IV_SIZE);
             
             std::vector<uint8_t> encrypted_data = crypto_manager_->encrypt_aes_gcm(message_data, key, iv);
@@ -416,17 +535,126 @@ private:
         }
     }
 
-    void send_key_rotation_response(int client_socket, const SecureComm::SessionInfo& session) {
-        SecureComm::MessageHeader header;
+    bool register_name(const std::string& name, const std::shared_ptr<ClientConnection>& conn) {
+        std::lock_guard<std::mutex> lock(registry_mutex_);
+        if (registry_.find(name) != registry_.end()) {
+            return false;
+        }
+        registry_[name] = conn;
+        conn->name = name;
+        return true;
+    }
+
+    void unregister(const std::shared_ptr<ClientConnection>& conn) {
+        std::lock_guard<std::mutex> lock(registry_mutex_);
+        if (!conn->name.empty()) {
+            registry_.erase(conn->name);
+        }
+    }
+
+    std::shared_ptr<ClientConnection> lookup(const std::string& name) {
+        std::lock_guard<std::mutex> lock(registry_mutex_);
+        auto it = registry_.find(name);
+        return it == registry_.end() ? nullptr : it->second;
+    }
+
+    // Returns a snapshot so callers can send without holding registry_mutex_.
+    // Holding it across socket I/O would let one slow client stall every other.
+    std::vector<std::shared_ptr<ClientConnection>> roster_snapshot() {
+        std::lock_guard<std::mutex> lock(registry_mutex_);
+        std::vector<std::shared_ptr<ClientConnection>> out;
+        out.reserve(registry_.size());
+        for (const auto& entry : registry_) {
+            out.push_back(entry.second);
+        }
+        return out;
+    }
+
+    // Encryption happens inside the connection's lock so a rotation cannot land
+    // between encrypting and sending, and so two relaying threads cannot interleave
+    // frames on one socket.
+    void send_chat(const std::shared_ptr<ClientConnection>& conn, const SecureComm::ChatMessage& msg) {
+        if (!conn->alive) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(conn->send_mutex);
+        try {
+            std::vector<uint8_t> tx = session_manager_->get_tx_key(conn->session_id);
+            std::vector<uint8_t> iv = crypto_manager_->generate_random_bytes(SecureComm::IV_SIZE);
+            std::vector<uint8_t> cipher =
+                crypto_manager_->encrypt_aes_gcm(SecureComm::serialize_chat(msg), tx, iv);
+
+            if (cipher.size() > SecureComm::MAX_MESSAGE_SIZE) {
+                return;
+            }
+
+            SecureComm::EncryptedMessage out{};
+            out.session_id = conn->session_id;
+            out.message_id = 0;
+            std::copy(iv.begin(), iv.end(), out.iv);
+            std::copy(cipher.begin(), cipher.end(), out.encrypted_data);
+
+            std::vector<uint8_t> signature =
+                crypto_manager_->sign_data(cipher, server_keypair_.private_key);
+            const size_t sig_len = std::min<size_t>(signature.size(), SecureComm::SIGNATURE_SIZE);
+            std::copy(signature.begin(), signature.begin() + sig_len, out.signature);
+
+            SecureComm::MessageHeader header{};
+            header.version = SecureComm::ProtocolVersion::V1_0;
+            header.type = SecureComm::MessageType::ENCRYPTED_MESSAGE;
+            header.sequence_number = 0;
+            header.timestamp = SecureComm::get_current_timestamp_seconds();
+            header.payload_size = static_cast<uint16_t>(cipher.size());
+            header.flags = 0;
+
+            std::vector<uint8_t> frame = SecureComm::serialize_header(header);
+            std::vector<uint8_t> body = SecureComm::serialize_encrypted_message(out);
+            frame.insert(frame.end(), body.begin(), body.end());
+
+            if (!send_data(conn->socket, frame)) {
+                conn->alive = false;
+            }
+        } catch (const std::exception&) {
+            conn->alive = false;
+        }
+    }
+
+    void broadcast_presence(const std::string& name, bool joined, const std::string& except) {
+        SecureComm::ChatMessage msg = SecureComm::make_chat(SecureComm::ChatType::PRESENCE);
+        SecureComm::set_chat_field(msg.sender, SecureComm::MAX_NAME_LEN, name);
+        SecureComm::set_chat_text(msg, name + (joined ? " joined" : " left"));
+
+        for (const auto& peer : roster_snapshot()) {
+            if (peer->name != except) {
+                send_chat(peer, msg);
+            }
+        }
+    }
+
+    void send_notice(const std::shared_ptr<ClientConnection>& conn, const std::string& text) {
+        SecureComm::ChatMessage msg = SecureComm::make_chat(SecureComm::ChatType::NOTICE);
+        SecureComm::set_chat_text(msg, text);
+        send_chat(conn, msg);
+    }
+
+    // Announces that this peer is rotating the direction it sends on. The frame is
+    // header-only, so it needs no key, and it goes out before the key changes. The
+    // peer rotates its rx key when it reads the frame, so both switch at the same
+    // point in the stream and neither direction disturbs the other.
+    bool rotate_tx_and_announce(int client_socket, uint32_t session_id) {
+        SecureComm::MessageHeader header{};
         header.version = SecureComm::ProtocolVersion::V1_0;
         header.type = SecureComm::MessageType::KEY_ROTATION;
-        header.sequence_number = session.message_counter;
+        header.sequence_number = 0;
         header.timestamp = SecureComm::get_current_timestamp_seconds();
         header.payload_size = 0;
         header.flags = 0;
 
-        std::vector<uint8_t> response_data = SecureComm::serialize_header(header);
-        send_data(client_socket, response_data);
+        if (!send_data(client_socket, SecureComm::serialize_header(header))) {
+            return false;
+        }
+        session_manager_->rotate_tx_key(session_id);
+        return true;
     }
 
     void send_error(int client_socket, SecureComm::ErrorCode error_code) {
