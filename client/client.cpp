@@ -9,6 +9,7 @@
 #include <mutex>
 #include <thread>
 #include <atomic>
+#include <condition_variable>
 
 #ifdef _WIN32
     #include <winsock2.h>
@@ -39,6 +40,11 @@ private:
     std::mutex key_mutex_;
     std::thread receive_thread_;
     std::atomic<bool> connected_{false};
+    std::mutex register_mutex_;
+    std::condition_variable register_cv_;
+    bool register_answered_ = false;
+    bool register_ok_ = false;
+    std::string my_name_;
 
 public:
     SecureClient() : client_socket_(-1), message_counter_(0) {
@@ -143,13 +149,18 @@ public:
         }
     }
 
-    bool send_encrypted_message(const std::string& message) {
+    bool send_chat(const SecureComm::ChatMessage& chat) {
         try {
-            std::vector<uint8_t> message_data(message.begin(), message.end());
+            std::vector<uint8_t> message_data = SecureComm::serialize_chat(chat);
             std::vector<uint8_t> iv = crypto_manager_->generate_random_bytes(SecureComm::IV_SIZE);
-            
-            std::vector<uint8_t> encrypted_data = crypto_manager_->encrypt_aes_gcm(message_data, session_keys_.tx_key, iv);
-            
+
+            std::vector<uint8_t> tx;
+            {
+                std::lock_guard<std::mutex> lock(key_mutex_);
+                tx = session_keys_.tx_key;
+            }
+            std::vector<uint8_t> encrypted_data = crypto_manager_->encrypt_aes_gcm(message_data, tx, iv);
+
             SecureComm::EncryptedMessage encrypted_msg{};
             encrypted_msg.session_id = current_session_.session_id;
             encrypted_msg.message_id = message_counter_;
@@ -185,7 +196,6 @@ public:
             }
 
             message_counter_++;
-            std::cout << "Sent encrypted message: " << message << std::endl;
 
             // Replies arrive on the receive thread, so there is nothing to wait for here.
             return true;
@@ -194,6 +204,43 @@ public:
             std::cerr << "Failed to send encrypted message: " << e.what() << std::endl;
             return false;
         }
+    }
+
+    bool send_encrypted_message(const std::string& message) {
+        SecureComm::ChatMessage chat = SecureComm::make_chat(SecureComm::ChatType::BROADCAST);
+        SecureComm::set_chat_text(chat, message);
+        return send_chat(chat);
+    }
+
+    // Prompts until the server accepts a name. The reply arrives on the receive
+    // thread, so the prompt waits on a condition variable rather than reading the
+    // socket itself.
+    bool register_name() {
+        std::string name;
+        while (connected_) {
+            std::cout << "Enter your name: " << std::flush;
+            if (!std::getline(std::cin, name)) {
+                return false;
+            }
+
+            SecureComm::ChatMessage msg = SecureComm::make_chat(SecureComm::ChatType::REGISTER);
+            SecureComm::set_chat_text(msg, name);
+            if (!send_chat(msg)) {
+                return false;
+            }
+
+            std::unique_lock<std::mutex> lock(register_mutex_);
+            register_cv_.wait(lock, [this] { return register_answered_ || !connected_; });
+            if (!connected_) {
+                return false;
+            }
+            register_answered_ = false;
+            if (register_ok_) {
+                my_name_ = name;
+                return true;
+            }
+        }
+        return false;
     }
 
     // Announces that this peer is rotating the direction it sends on. The frame is
@@ -228,6 +275,11 @@ public:
     }
 
     void interactive_mode() {
+        if (!register_name()) {
+            std::cerr << "Registration failed" << std::endl;
+            return;
+        }
+
         std::cout << "\nInteractive mode - Type 'quit' to exit, 'rotate' to rotate keys" << std::endl;
         std::string input;
         
@@ -260,6 +312,23 @@ private:
     }
 
     void handle_chat(const SecureComm::ChatMessage& msg) {
+        if (msg.type == SecureComm::ChatType::REGISTER_OK ||
+            msg.type == SecureComm::ChatType::REGISTER_FAIL) {
+            const bool ok = (msg.type == SecureComm::ChatType::REGISTER_OK);
+            if (ok) {
+                std::cout << "Registered as " << SecureComm::get_chat_text(msg) << std::endl;
+            } else {
+                std::cout << SecureComm::get_chat_text(msg) << std::endl;
+            }
+            {
+                std::lock_guard<std::mutex> lock(register_mutex_);
+                register_ok_ = ok;
+                register_answered_ = true;
+            }
+            register_cv_.notify_one();
+            return;
+        }
+
         print_incoming(SecureComm::get_chat_text(msg));
     }
 
@@ -312,6 +381,7 @@ private:
                     connected_ = false;
                     print_incoming("*** disconnected from server ***");
                 }
+                register_cv_.notify_all();
                 break;
             }
             try {
@@ -319,6 +389,7 @@ private:
             } catch (const std::exception& e) {
                 connected_ = false;
                 print_incoming(std::string("*** receive error: ") + e.what() + " ***");
+                register_cv_.notify_all();
                 break;
             }
         }
