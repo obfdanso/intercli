@@ -23,6 +23,7 @@
 #endif
 
 #include <cstring>
+#include <signal.h>
 
 // using namespace SecureComm; // Removed to avoid namespace conflicts
 
@@ -90,6 +91,7 @@ public:
 #else
             close(client_socket_);
 #endif
+            client_socket_ = -1;
             return false;
         }
 
@@ -100,6 +102,7 @@ public:
 #else
             close(client_socket_);
 #endif
+            client_socket_ = -1;
             return false;
         }
 
@@ -113,6 +116,7 @@ public:
 #else
             close(client_socket_);
 #endif
+            client_socket_ = -1;
             return false;
         }
 
@@ -199,7 +203,7 @@ public:
 
             // Rotate the direction this peer sends on, every 10 messages, matching
             // what the server does for its own direction.
-            if (message_counter_ % 10 == 0) {
+            if (message_counter_ % SecureComm::KEY_ROTATION_INTERVAL == 0) {
                 rotate_tx_and_announce();
             }
 
@@ -315,7 +319,10 @@ public:
         
         while (true) {
             std::cout << "> ";
-            std::getline(std::cin, input);
+            // Stop at end of input; otherwise a closed stdin spins this loop forever.
+            if (!std::getline(std::cin, input)) {
+                break;
+            }
             
             if (input == "quit" || input == "exit") {
                 // Replies are asynchronous now, so give any still in flight a moment
@@ -415,6 +422,12 @@ private:
             rx = session_keys_.rx_key;
         }
 
+        // payload_size comes off the wire; without this check it would read past
+        // the end of encrypted_data.
+        if (header.payload_size > SecureComm::MAX_MESSAGE_SIZE) {
+            throw std::runtime_error("Encrypted payload size out of range");
+        }
+
         std::vector<uint8_t> iv(msg.iv, msg.iv + SecureComm::IV_SIZE);
         std::vector<uint8_t> cipher(msg.encrypted_data, msg.encrypted_data + header.payload_size);
         std::vector<uint8_t> plain = crypto_manager_->decrypt_aes_gcm(cipher, rx, iv);
@@ -475,8 +488,9 @@ private:
                      dh_keypair_.public_key.end(),
                      handshake.public_key);
             
-            // Generate nonce
-            std::vector<uint8_t> nonce = SecureComm::generate_nonce(SecureComm::IV_SIZE);
+            // The nonce salts the session key derivation, so draw it from OpenSSL's
+            // CSPRNG rather than the predictable mt19937 behind generate_nonce.
+            std::vector<uint8_t> nonce = crypto_manager_->generate_random_bytes(SecureComm::IV_SIZE);
             std::copy(nonce.begin(), nonce.end(), handshake.nonce);
 
             SecureComm::MessageHeader header;
@@ -632,10 +646,17 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+#ifndef _WIN32
+    // Sending after the server has gone raises SIGPIPE, which would kill the client
+    // instead of letting the failed send be reported.
+    signal(SIGPIPE, SIG_IGN);
+#endif
+
     std::string server_ip = argv[1];
-    uint16_t port = (argc > 2) ? static_cast<uint16_t>(std::stoi(argv[2])) : SecureComm::DEFAULT_PORT;
 
     try {
+        // Inside the try: std::stoi throws on a non-numeric port.
+        uint16_t port = (argc > 2) ? static_cast<uint16_t>(std::stoi(argv[2])) : SecureComm::DEFAULT_PORT;
         SecureClient client;
         
         if (!client.connect(server_ip, port)) {
