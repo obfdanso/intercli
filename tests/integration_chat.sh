@@ -7,8 +7,18 @@
 
 set -u
 
-BUILD="${1:-build_fix}"
+BUILD="${1:-build}"
 cd "$BUILD" || { echo "cannot enter build dir $BUILD"; exit 1; }
+
+# Executables carry .exe on Windows only.
+EXE=""
+[ -f ./server.exe ] && EXE=".exe"
+SERVER="./server$EXE"
+CLIENT="./client$EXE"
+
+# timeout is part of GNU coreutils; macOS does not ship it, so run without a limit there.
+TIMEOUT=""
+command -v timeout >/dev/null 2>&1 && TIMEOUT="timeout 20"
 
 WORK=$(mktemp -d)
 fail=0
@@ -31,27 +41,30 @@ check_absent() {
     fi
 }
 
+SERVER_PID=""
 cleanup() {
-    taskkill //F //IM server.exe >/dev/null 2>&1 || true
-    pkill -f "server.exe" >/dev/null 2>&1 || true
+    # Stop only the server this test started, never other processes on the machine.
+    [ -n "$SERVER_PID" ] && kill "$SERVER_PID" >/dev/null 2>&1
     rm -rf "$WORK"
 }
 trap cleanup EXIT
 
-# Start fresh: a server left over from an earlier run would hold port 8080.
-taskkill //F //IM server.exe >/dev/null 2>&1 || true
-sleep 1
-
-./server.exe > "$WORK/server.log" 2>&1 &
+"$SERVER" > "$WORK/server.log" 2>&1 &
+SERVER_PID=$!
 sleep 3
+if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+    echo "server failed to start (is port 8080 already in use?)"
+    cat "$WORK/server.log"
+    exit 1
+fi
 
 # alice stays connected long enough to receive everything the others send.
-{ echo alice; sleep 30; echo quit; } | ./client.exe 127.0.0.1 8080 > "$WORK/alice.out" 2>&1 &
+{ echo alice; sleep 30; echo quit; } | "$CLIENT" 127.0.0.1 8080 > "$WORK/alice.out" 2>&1 &
 ALICE=$!
 sleep 2
 
 # carol joins after alice, so alice sees a join notice for her.
-{ echo carol; sleep 26; echo quit; } | ./client.exe 127.0.0.1 8080 > "$WORK/carol.out" 2>&1 &
+{ echo carol; sleep 26; echo quit; } | "$CLIENT" 127.0.0.1 8080 > "$WORK/carol.out" 2>&1 &
 CAROL=$!
 sleep 2
 
@@ -65,13 +78,13 @@ sleep 2
   for i in $(seq 1 12); do echo "filler-$i"; sleep 0.3; done
   sleep 1
   echo "after-rotation"; sleep 2
-  echo quit; } | ./client.exe 127.0.0.1 8080 > "$WORK/bob.out" 2>&1
+  echo quit; } | "$CLIENT" 127.0.0.1 8080 > "$WORK/bob.out" 2>&1
 
 # Wait only on the clients; the server runs until cleanup kills it.
 wait $ALICE $CAROL
 
 # dave's input ends without "quit"; the client must exit rather than spin.
-{ echo dave; sleep 1; } | timeout 20 ./client.exe 127.0.0.1 8080 > "$WORK/dave.out" 2>&1
+{ echo dave; sleep 1; } | $TIMEOUT "$CLIENT" 127.0.0.1 8080 > "$WORK/dave.out" 2>&1
 DAVE_STATUS=$?
 
 echo "Registration"

@@ -64,56 +64,51 @@ sudo dnf install gcc-c++ cmake openssl-devel
 brew install cmake openssl
 ```
 
-### Build Instructions
+### Build Instructions (Linux / macOS)
 
-1. **Clone and navigate to the project:**
 ```bash
-cd secure_comm
+git clone https://github.com/obfdanso/intercli
+cd intercli
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
 ```
 
-2. **Create build directory:**
-```bash
-mkdir build && cd build
-```
+On macOS with Homebrew, add `-DOPENSSL_ROOT_DIR="$(brew --prefix openssl)"` to the first
+`cmake` command if CMake cannot find OpenSSL.
 
-3. **Configure with CMake:**
-```bash
-cmake ..
-```
+The programs are `build/server` and `build/client`.
 
-4. **Build the project:**
-```bash
-make -j$(nproc)
-```
+### Building on Windows
 
-5. **Install (optional):**
-```bash
-sudo make install
-```
-
-### Building on Windows (MSVC)
-
-Build from a **Developer Command Prompt for VS**, or call `vcvars64.bat` first, so that
-`cl.exe` is on the path. Point CMake at an OpenSSL 3.x installation with
-`OPENSSL_ROOT_DIR`:
+Install [CMake](https://cmake.org/download/), Visual Studio (with the "Desktop development
+with C++" workload) and [OpenSSL 3.x or newer for Win64](https://slproweb.com/products/Win32OpenSSL.html).
+Then, from any terminal:
 
 ```bat
-cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release -DOPENSSL_ROOT_DIR="C:/Program Files/OpenSSL-Win64"
-cmake --build build
+git clone https://github.com/obfdanso/intercli
+cd intercli
+cmake -S . -B build -DOPENSSL_ROOT_DIR="C:/Program Files/OpenSSL-Win64"
+cmake --build build --config Release
 ```
 
-The OpenSSL runtime DLLs (`libcrypto-3-x64.dll`, `libssl-3-x64.dll`) must sit next to the
-executables or be on `PATH`.
+The programs are `build\Release\server.exe` and `build\Release\client.exe`. The OpenSSL
+DLLs are copied next to them during the build, so nothing needs adding to `PATH`.
 
 ### Running the tests
 
+Linux / macOS:
 ```bash
 cd build && ctest --output-on-failure
 ```
 
+Windows (Visual Studio builds need the configuration named):
+```bat
+cd build && ctest -C Release --output-on-failure
+```
+
 This runs the `dh_key_exchange`, `aes_gcm`, `chat_envelope` and `directional_keys` unit
-tests, plus `chat_integration`, which starts a real server and three clients (it needs
-`bash`, and is skipped where bash is not available).
+tests, plus `chat_integration`, which starts a real server and three clients on port 8080
+(it needs `bash`, such as Git Bash on Windows, and is skipped where bash is not available).
 
 ## 🚀 Usage
 
