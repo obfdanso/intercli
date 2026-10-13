@@ -32,6 +32,7 @@ secure_comm/
 │   └── server.cpp         # Secure server implementation
 ├── client/
 │   └── client.cpp         # Secure client implementation
+├── tests/                 # Unit tests and the three-client integration test
 └── README.md              # This file
 ```
 
@@ -110,7 +111,9 @@ executables or be on `PATH`.
 cd build && ctest --output-on-failure
 ```
 
-This runs the `dh_key_exchange` and `aes_gcm` regression tests.
+This runs the `dh_key_exchange`, `aes_gcm`, `chat_envelope` and `directional_keys` unit
+tests, plus `chat_integration`, which starts a real server and three clients (it needs
+`bash`, and is skipped where bash is not available).
 
 ## 🚀 Usage
 
@@ -284,7 +287,7 @@ void rotate_session_key(uint32_t session_id);
 ### Basic Functionality Test
 ```bash
 # Terminal 1: Start server
-./server 8080
+./server
 
 # Terminal 2: Connect client
 ./client 127.0.0.1 8080
