@@ -42,6 +42,8 @@ constexpr size_t MAX_PUBLIC_KEY_SIZE = 2048;
 constexpr size_t MAX_NAME_LEN = 32;
 constexpr size_t MAX_TEXT_LEN = 1024;
 constexpr size_t MAX_FRAME_SIZE = 65536;
+// Each peer rotates the key it sends with after this many messages sent.
+constexpr uint32_t KEY_ROTATION_INTERVAL = 10;
 
 // Message types
 enum class MessageType : uint8_t {

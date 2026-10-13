@@ -14,6 +14,7 @@
     #pragma comment(lib, "ws2_32.lib")
 #else
     #include <sys/socket.h>
+    #include <sys/select.h>
     #include <netinet/in.h>
     #include <arpa/inet.h>
     #include <unistd.h>
@@ -22,8 +23,39 @@
 #include <cstring>
 #include <signal.h>
 #include <map>
+#include <set>
 #include <mutex>
+#include <condition_variable>
 #include <string>
+
+// Set by the signal handler; run() polls it so Ctrl+C actually stops the server.
+std::atomic<bool> g_running(true);
+
+static void close_socket(int s) {
+#ifdef _WIN32
+    closesocket(s);
+#else
+    close(s);
+#endif
+}
+
+// Waits up to timeout_ms for the socket to become readable: > 0 ready, 0 timed
+// out, < 0 error. Blocking calls are polled this way so threads notice a shutdown:
+// on Windows, neither shutdown() nor a signal interrupts a recv() or accept()
+// already in progress.
+static int wait_readable(int s, int timeout_ms) {
+    fd_set read_fds;
+    FD_ZERO(&read_fds);
+#ifdef _WIN32
+    FD_SET(static_cast<SOCKET>(s), &read_fds);
+#else
+    FD_SET(s, &read_fds);
+#endif
+    timeval timeout{};
+    timeout.tv_sec = timeout_ms / 1000;
+    timeout.tv_usec = (timeout_ms % 1000) * 1000;
+    return select(s + 1, &read_fds, nullptr, nullptr, &timeout);
+}
 
 // One connected client. Held by shared_ptr because a relaying thread may be
 // mid-send to a client that is disconnecting; the object outlives the registry
@@ -33,6 +65,7 @@ struct ClientConnection {
     uint32_t          session_id = 0;
     std::string       name;
     std::mutex        send_mutex;
+    uint32_t          sent_count = 0;  // guarded by send_mutex
     std::atomic<bool> alive{true};
 };
 
@@ -45,7 +78,14 @@ private:
     std::unique_ptr<SecureComm::CryptoManager> crypto_manager_;
     std::unique_ptr<SecureComm::SessionManager> session_manager_;
     std::unique_ptr<SecureComm::KeyManager> key_manager_;
-    std::vector<std::thread> client_threads_;
+    // Every live connection, registered or not, so stop() can wait for their
+    // threads. A thread removes its own entry as the last thing it does.
+    std::set<std::shared_ptr<ClientConnection>> connections_;
+    std::mutex connections_mutex_;
+    std::condition_variable connections_cv_;
+    std::thread cleanup_thread_;
+    std::mutex stop_mutex_;
+    std::condition_variable stop_cv_;
     std::map<std::string, std::shared_ptr<ClientConnection>> registry_;
     std::mutex registry_mutex_;
     SecureComm::KeyPair server_keypair_;
@@ -123,23 +163,26 @@ public:
         std::cout << "Secure server started on port " << port << std::endl;
         std::cout << "Server public key: " << SecureComm::bytes_to_hex(server_keypair_.public_key).substr(0, 64) << "..." << std::endl;
 
-        // Start cleanup thread
-        std::thread cleanup_thread([this]() {
-            while (running_) {
-                std::this_thread::sleep_for(std::chrono::minutes(5));
+        // Expire old sessions every 5 minutes; stop() wakes this early to exit.
+        cleanup_thread_ = std::thread([this]() {
+            std::unique_lock<std::mutex> lock(stop_mutex_);
+            while (!stop_cv_.wait_for(lock, std::chrono::minutes(5), [this] { return !running_; })) {
                 session_manager_->cleanup_expired_sessions();
             }
         });
-        cleanup_thread.detach();
 
         return true;
     }
 
     void run() {
-        while (running_) {
+        while (running_ && g_running) {
+            if (wait_readable(server_socket_, 500) <= 0) {
+                continue;
+            }
+
             struct sockaddr_in client_addr;
             socklen_t client_len = sizeof(client_addr);
-            
+
             int client_socket = static_cast<int>(accept(server_socket_, (struct sockaddr*)&client_addr, &client_len));
             if (client_socket < 0) {
                 if (running_) {
@@ -148,40 +191,47 @@ public:
                 continue;
             }
 
-            std::cout << "New client connected from " << inet_ntoa(client_addr.sin_addr) 
+            char addr_text[INET_ADDRSTRLEN] = "?";
+            inet_ntop(AF_INET, &client_addr.sin_addr, addr_text, sizeof(addr_text));
+            std::cout << "New client connected from " << addr_text
                       << ":" << ntohs(client_addr.sin_port) << std::endl;
 
-            // Handle client in separate thread
-            client_threads_.emplace_back(&SecureServer::handle_client, this, client_socket);
+            auto conn = std::make_shared<ClientConnection>();
+            conn->socket = client_socket;
+            {
+                std::lock_guard<std::mutex> lock(connections_mutex_);
+                connections_.insert(conn);
+            }
+
+            // Threads are detached; stop() waits on connections_ instead of joining,
+            // so finished threads do not pile up for the life of the server.
+            std::thread(&SecureServer::handle_client, this, conn).detach();
         }
     }
 
     void stop() {
-        running_ = false;
-        
+        {
+            std::lock_guard<std::mutex> lock(stop_mutex_);
+            running_ = false;
+        }
+        stop_cv_.notify_all();
+        if (cleanup_thread_.joinable()) {
+            cleanup_thread_.join();
+        }
+
         if (server_socket_ >= 0) {
-#ifdef _WIN32
-            closesocket(server_socket_);
-#else
-            close(server_socket_);
-#endif
+            close_socket(server_socket_);
             server_socket_ = -1;
         }
 
-        // Wait for all client threads to finish
-        for (auto& thread : client_threads_) {
-            if (thread.joinable()) {
-                thread.join();
-            }
-        }
-        client_threads_.clear();
+        // Client threads poll running_ while they wait for data, so each one
+        // notices and finishes on its own; wait for all of them.
+        std::unique_lock<std::mutex> lock(connections_mutex_);
+        connections_cv_.wait(lock, [this] { return connections_.empty(); });
     }
 
 private:
-    void handle_client(int client_socket) {
-        auto conn = std::make_shared<ClientConnection>();
-        conn->socket = client_socket;
-
+    void handle_client(std::shared_ptr<ClientConnection> conn) {
         try {
             uint32_t client_id = SecureComm::generate_client_id();
             SecureComm::SessionInfo session = session_manager_->create_session(client_id);
@@ -189,21 +239,12 @@ private:
 
             std::cout << "Created session " << session.session_id << " for client " << client_id << std::endl;
 
-            // Perform secure handshake
-            if (!perform_handshake(client_socket, session)) {
+            if (!perform_handshake(conn->socket, session)) {
                 std::cerr << "Handshake failed for client " << client_id << std::endl;
-#ifdef _WIN32
-                closesocket(client_socket);
-#else
-                close(client_socket);
-#endif
-                return;
+            } else {
+                std::cout << "Handshake completed successfully for client " << client_id << std::endl;
+                handle_encrypted_messages(conn, session);
             }
-
-            std::cout << "Handshake completed successfully for client " << client_id << std::endl;
-
-            // Handle encrypted messages
-            handle_encrypted_messages(conn, session);
 
         } catch (const std::exception& e) {
             std::cerr << "Error handling client: " << e.what() << std::endl;
@@ -215,13 +256,22 @@ private:
         if (!departed.empty()) {
             broadcast_presence(departed, false, std::string());
         }
-
-#ifdef _WIN32
-        closesocket(client_socket);
-#else
-        close(client_socket);
-#endif
+        if (conn->session_id != 0) {
+            session_manager_->remove_session(conn->session_id);
+        }
         std::cout << "Client disconnected" << std::endl;
+
+        // This must be the last thing the thread does: once the entry is gone,
+        // stop() may return and the server may be destroyed. The socket is closed
+        // under send_mutex so a relaying thread cannot write to it mid-close, or to
+        // an unrelated connection that reuses the descriptor afterwards.
+        std::lock_guard<std::mutex> lock(connections_mutex_);
+        {
+            std::lock_guard<std::mutex> send_lock(conn->send_mutex);
+            close_socket(conn->socket);
+        }
+        connections_.erase(conn);
+        connections_cv_.notify_all();
     }
 
     bool perform_handshake(int client_socket, SecureComm::SessionInfo& session) {
@@ -325,7 +375,6 @@ private:
     void handle_encrypted_messages(const std::shared_ptr<ClientConnection>& conn,
                                    SecureComm::SessionInfo& session) {
         const int client_socket = conn->socket;
-        uint32_t message_counter = 0;
 
         while (running_) {
             try {
@@ -347,7 +396,15 @@ private:
                                                                                                       encrypted_msg.signature + SecureComm::SIGNATURE_SIZE));
                     if (auth_result != SecureComm::AuthResult::SUCCESS) {
                         std::cerr << "Authentication failed: " << static_cast<int>(auth_result) << std::endl;
-                        send_error(client_socket, SecureComm::ErrorCode::AUTHENTICATION_FAILED);
+                        send_error(conn, SecureComm::ErrorCode::AUTHENTICATION_FAILED);
+                        break;
+                    }
+
+                    // payload_size comes off the wire; without this check it would
+                    // read past the end of encrypted_data.
+                    if (header.payload_size > SecureComm::MAX_MESSAGE_SIZE) {
+                        std::cerr << "Encrypted payload size out of range" << std::endl;
+                        send_error(conn, SecureComm::ErrorCode::INVALID_MESSAGE);
                         break;
                     }
 
@@ -384,13 +441,11 @@ private:
                                       << session.session_id << std::endl;
                             broadcast_presence(wanted, true, wanted);
                         }
-                        message_counter++;
                         continue;
                     }
 
                     if (conn->name.empty()) {
                         send_notice(conn, "Register a name before sending messages");
-                        message_counter++;
                         continue;
                     }
 
@@ -400,7 +455,6 @@ private:
                         std::shared_ptr<ClientConnection> target = lookup(to);
                         if (!target) {
                             send_notice(conn, "No such user: " + to);
-                            message_counter++;
                             continue;
                         }
 
@@ -415,7 +469,6 @@ private:
 
                         std::cout << conn->name << " -> " << to << ": "
                                   << SecureComm::get_chat_text(chat) << std::endl;
-                        message_counter++;
                         continue;
                     }
 
@@ -433,7 +486,6 @@ private:
 
                         std::cout << conn->name << " (all): "
                                   << SecureComm::get_chat_text(chat) << std::endl;
-                        message_counter++;
                         continue;
                     }
 
@@ -452,18 +504,10 @@ private:
                         SecureComm::set_chat_text(
                             reply, "Online (" + std::to_string(count) + "): " + names);
                         send_chat(conn, reply);
-                        message_counter++;
                         continue;
                     }
 
                     send_notice(conn, "Unsupported message type");
-                    message_counter++;
-
-                    // Rotate the direction this peer sends on, every 10 messages.
-                    if (message_counter % 10 == 0) {
-                        rotate_tx_and_announce(client_socket, session.session_id);
-                        std::cout << "Rotated send key for session " << session.session_id << std::endl;
-                    }
 
                 } else if (header.type == SecureComm::MessageType::KEY_ROTATION) {
                     // The client has rotated the direction it sends on.
@@ -476,62 +520,14 @@ private:
 
                 } else {
                     std::cerr << "Unknown message type: " << static_cast<int>(header.type) << std::endl;
-                    send_error(client_socket, SecureComm::ErrorCode::INVALID_MESSAGE);
+                    send_error(conn, SecureComm::ErrorCode::INVALID_MESSAGE);
                 }
 
             } catch (const std::exception& e) {
                 std::cerr << "Error handling encrypted message: " << e.what() << std::endl;
-                send_error(client_socket, SecureComm::ErrorCode::INTERNAL_ERROR);
+                send_error(conn, SecureComm::ErrorCode::INTERNAL_ERROR);
                 break;
             }
-        }
-    }
-
-    void send_encrypted_message(int client_socket, const SecureComm::SessionInfo& session, const std::string& message) {
-        try {
-            // The payload is a ChatMessage envelope, which the client decodes by type.
-            SecureComm::ChatMessage chat = SecureComm::make_chat(SecureComm::ChatType::NOTICE);
-            SecureComm::set_chat_text(chat, message);
-            std::vector<uint8_t> message_data = SecureComm::serialize_chat(chat);
-
-            std::vector<uint8_t> key = session_manager_->get_tx_key(session.session_id);
-            std::vector<uint8_t> iv = crypto_manager_->generate_random_bytes(SecureComm::IV_SIZE);
-            
-            std::vector<uint8_t> encrypted_data = crypto_manager_->encrypt_aes_gcm(message_data, key, iv);
-            
-            SecureComm::EncryptedMessage encrypted_msg{};
-            encrypted_msg.session_id = session.session_id;
-            encrypted_msg.message_id = session.message_counter;
-            
-            // Copy IV
-            size_t iv_copy_size = std::min<size_t>(iv.size(), SecureComm::IV_SIZE);
-            std::copy(iv.begin(), iv.begin() + iv_copy_size, encrypted_msg.iv);
-            
-            // Copy encrypted data
-            size_t data_copy_size = std::min<size_t>(encrypted_data.size(), SecureComm::MAX_MESSAGE_SIZE);
-            std::copy(encrypted_data.begin(), encrypted_data.begin() + data_copy_size, encrypted_msg.encrypted_data);
-            
-            // Sign the encrypted data
-            std::vector<uint8_t> signature = crypto_manager_->sign_data(encrypted_data, server_keypair_.private_key);
-            size_t sig_copy_size = std::min<size_t>(signature.size(), SecureComm::SIGNATURE_SIZE);
-            std::copy(signature.begin(), signature.begin() + sig_copy_size, encrypted_msg.signature);
-
-            SecureComm::MessageHeader header;
-            header.version = SecureComm::ProtocolVersion::V1_0;
-            header.type = SecureComm::MessageType::ENCRYPTED_MESSAGE;
-            header.sequence_number = session.message_counter;
-            header.timestamp = SecureComm::get_current_timestamp_seconds();
-            header.payload_size = static_cast<uint16_t>(encrypted_data.size());
-            header.flags = 0;
-
-            std::vector<uint8_t> response_data = SecureComm::serialize_header(header);
-            std::vector<uint8_t> msg_payload = SecureComm::serialize_encrypted_message(encrypted_msg);
-            response_data.insert(response_data.end(), msg_payload.begin(), msg_payload.end());
-
-            send_data(client_socket, response_data);
-
-        } catch (const std::exception& e) {
-            std::cerr << "Failed to send encrypted message: " << e.what() << std::endl;
         }
     }
 
@@ -578,6 +574,10 @@ private:
             return;
         }
         std::lock_guard<std::mutex> lock(conn->send_mutex);
+        // Recheck under the lock: the connection may have closed while we waited.
+        if (!conn->alive) {
+            return;
+        }
         try {
             std::vector<uint8_t> tx = session_manager_->get_tx_key(conn->session_id);
             std::vector<uint8_t> iv = crypto_manager_->generate_random_bytes(SecureComm::IV_SIZE);
@@ -613,6 +613,17 @@ private:
 
             if (!send_data(conn->socket, frame)) {
                 conn->alive = false;
+                return;
+            }
+
+            // Rotating here, under send_mutex, means no other relaying thread can
+            // encrypt with the old key and send after the marker has gone out.
+            if (++conn->sent_count % SecureComm::KEY_ROTATION_INTERVAL == 0) {
+                if (!rotate_tx_and_announce(conn->socket, conn->session_id)) {
+                    conn->alive = false;
+                    return;
+                }
+                std::cout << "Rotated send key for session " << conn->session_id << std::endl;
             }
         } catch (const std::exception&) {
             conn->alive = false;
@@ -640,7 +651,8 @@ private:
     // Announces that this peer is rotating the direction it sends on. The frame is
     // header-only, so it needs no key, and it goes out before the key changes. The
     // peer rotates its rx key when it reads the frame, so both switch at the same
-    // point in the stream and neither direction disturbs the other.
+    // point in the stream and neither direction disturbs the other. The caller must
+    // hold the connection's send_mutex.
     bool rotate_tx_and_announce(int client_socket, uint32_t session_id) {
         SecureComm::MessageHeader header{};
         header.version = SecureComm::ProtocolVersion::V1_0;
@@ -657,7 +669,9 @@ private:
         return true;
     }
 
-    void send_error(int client_socket, SecureComm::ErrorCode error_code) {
+    // Takes send_mutex like send_chat, so an error frame cannot interleave with a
+    // frame another thread is relaying to the same socket.
+    void send_error(const std::shared_ptr<ClientConnection>& conn, SecureComm::ErrorCode error_code) {
         SecureComm::MessageHeader header;
         header.version = SecureComm::ProtocolVersion::V1_0;
         header.type = SecureComm::MessageType::ERROR_MESSAGE;
@@ -671,12 +685,22 @@ private:
                                        reinterpret_cast<const uint8_t*>(&error_code) + sizeof(SecureComm::ErrorCode));
         response_data.insert(response_data.end(), error_data.begin(), error_data.end());
 
-        send_data(client_socket, response_data);
+        std::lock_guard<std::mutex> lock(conn->send_mutex);
+        if (conn->alive) {
+            send_data(conn->socket, response_data);
+        }
     }
 
     bool receive_all(int client_socket, uint8_t* data, size_t length) {
         size_t total = 0;
         while (total < length) {
+            const int ready = wait_readable(client_socket, 500);
+            if (ready < 0 || (ready == 0 && !running_)) {
+                return false;
+            }
+            if (ready == 0) {
+                continue;
+            }
             int received = recv(client_socket, reinterpret_cast<char*>(data + total),
                                 static_cast<int>(length - total), 0);
             if (received <= 0) {
@@ -729,18 +753,22 @@ private:
     }
 };
 
-std::atomic<bool> g_running(true);
-
-void signal_handler(int signal) {
-    if (signal == SIGINT || signal == SIGTERM) {
-        std::cout << "\nReceived signal " << signal << ", shutting down..." << std::endl;
-        g_running = false;
-    }
+// Only sets a flag: iostreams are not safe to use inside a signal handler.
+void signal_handler(int) {
+    g_running = false;
 }
 
 int main() {
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
+#ifdef _WIN32
+    // Ctrl+Break arrives as SIGBREAK on Windows.
+    signal(SIGBREAK, signal_handler);
+#else
+    // A send to a client that has just disconnected raises SIGPIPE, whose default
+    // action kills the whole server. The failed send is already handled.
+    signal(SIGPIPE, SIG_IGN);
+#endif
 
     try {
         SecureServer server;
@@ -761,6 +789,7 @@ int main() {
         std::cout << "Press Ctrl+C to stop" << std::endl;
 
         server.run();
+        std::cout << "Shutting down..." << std::endl;
 
     } catch (const std::exception& e) {
         std::cerr << "Server error: " << e.what() << std::endl;
