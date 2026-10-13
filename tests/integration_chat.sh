@@ -70,6 +70,10 @@ sleep 2
 # Wait only on the clients; the server runs until cleanup kills it.
 wait $ALICE $CAROL
 
+# dave's input ends without "quit"; the client must exit rather than spin.
+{ echo dave; sleep 1; } | timeout 20 ./client.exe 127.0.0.1 8080 > "$WORK/dave.out" 2>&1
+DAVE_STATUS=$?
+
 echo "Registration"
 grep -q "taken" "$WORK/bob.out"; check $? "duplicate name refused"
 grep -q "Registered as bob" "$WORK/bob.out"; check $? "retry with a free name succeeds"
@@ -93,6 +97,10 @@ echo "Key rotation with relays in flight"
 received=$(grep -o "filler-[0-9]*" "$WORK/alice.out" | sort -u | wc -l)
 [ "$received" -eq 12 ]; check $? "all 12 relayed messages arrived across the rotation ($received/12)"
 grep -q "after-rotation" "$WORK/alice.out"; check $? "traffic still decrypts after rotation"
+grep -q "Rotated send key for session" "$WORK/server.log"; check $? "server rotates its own send key"
+
+echo "Client input"
+[ "$DAVE_STATUS" -ne 124 ]; check $? "client exits when its input closes"
 
 echo "Server health"
 grep -qiE "error|failed" "$WORK/server.log"; check_absent $? "server log is clean"
