@@ -14,7 +14,7 @@
     #pragma comment(lib, "ws2_32.lib")
 #else
     #include <sys/socket.h>
-    #include <sys/select.h>
+    #include <poll.h>
     #include <netinet/in.h>
     #include <arpa/inet.h>
     #include <unistd.h>
@@ -43,18 +43,17 @@ static void close_socket(int s) {
 // out, < 0 error. Blocking calls are polled this way so threads notice a shutdown:
 // on Windows, neither shutdown() nor a signal interrupts a recv() or accept()
 // already in progress.
+// poll() rather than select(): FD_SET on a descriptor >= FD_SETSIZE writes out of bounds.
 static int wait_readable(int s, int timeout_ms) {
-    fd_set read_fds;
-    FD_ZERO(&read_fds);
+    pollfd p{};
+    p.events = POLLIN;
 #ifdef _WIN32
-    FD_SET(static_cast<SOCKET>(s), &read_fds);
+    p.fd = static_cast<SOCKET>(s);
+    return WSAPoll(&p, 1, timeout_ms);
 #else
-    FD_SET(s, &read_fds);
+    p.fd = s;
+    return poll(&p, 1, timeout_ms);
 #endif
-    timeval timeout{};
-    timeout.tv_sec = timeout_ms / 1000;
-    timeout.tv_usec = (timeout_ms % 1000) * 1000;
-    return select(s + 1, &read_fds, nullptr, nullptr, &timeout);
 }
 
 // One connected client. Held by shared_ptr because a relaying thread may be
