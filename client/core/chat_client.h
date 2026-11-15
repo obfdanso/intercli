@@ -76,11 +76,9 @@ public:
     bool connected() const;
     SessionStatus status() const;
 
-#ifdef INTERCLI_TESTING
     // Test only: drops the connection as if the network failed, so
     // on_disconnected fires.
     void drop_connection_for_test();
-#endif
 
 private:
     bool send_chat(const ChatMessage& chat);

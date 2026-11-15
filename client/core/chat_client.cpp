@@ -201,14 +201,12 @@ void ChatClient::disconnect() {
     close_socket();
 }
 
-#ifdef INTERCLI_TESTING
 void ChatClient::drop_connection_for_test() {
     const intptr_t s = socket_.load();
     if (s >= 0) {
         shutdown_raw(s);
     }
 }
-#endif
 
 bool ChatClient::connected() const {
     return connected_;

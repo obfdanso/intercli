@@ -8,6 +8,7 @@ qt_add_library(intercli_gui_lib STATIC
     text_utils.cpp
     conversation_list_model.cpp
     message_model.cpp
+    chat_controller.cpp
 )
 target_include_directories(intercli_gui_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(intercli_gui_lib PUBLIC
@@ -51,11 +52,23 @@ endif()
 
 # Qt Test programs for the app's non-visual parts. Qt's bin folder goes on PATH
 # so they run without deploying Qt next to them.
+# Pass WITH_SERVER for tests that need a running chat server on port 8080.
 function(intercli_add_qt_test name)
+    cmake_parse_arguments(ARG "WITH_SERVER" "" "" ${ARGN})
     qt_add_executable(${name} tests/${name}.cpp)
     target_link_libraries(${name} PRIVATE intercli_gui_lib Qt6::Test)
     set_target_properties(${name} PROPERTIES AUTOMOC ON)
-    add_test(NAME ${name} COMMAND ${name})
+    if(ARG_WITH_SERVER)
+        if(NOT BASH_PROGRAM)
+            return()
+        endif()
+        add_test(NAME ${name}
+                 COMMAND ${BASH_PROGRAM} ${CMAKE_SOURCE_DIR}/tests/run_with_server.sh
+                         $<TARGET_FILE:server> $<TARGET_FILE:${name}>)
+        set_tests_properties(${name} PROPERTIES TIMEOUT 180 RESOURCE_LOCK port8080)
+    else()
+        add_test(NAME ${name} COMMAND ${name})
+    endif()
     set_tests_properties(${name} PROPERTIES
         ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT6_INSTALL_PREFIX}/bin")
     if(WIN32 AND OPENSSL_RUNTIME_DLLS)
@@ -67,6 +80,7 @@ endfunction()
 intercli_add_qt_test(test_text_utils)
 intercli_add_qt_test(test_conversation_list_model)
 intercli_add_qt_test(test_message_model)
+intercli_add_qt_test(test_chat_controller WITH_SERVER)
 
 if(WIN32)
     # Copy Qt's DLLs and QML modules next to intercli.exe so it runs without Qt on PATH.

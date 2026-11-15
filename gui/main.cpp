@@ -1,9 +1,12 @@
 // intercli desktop app entry point.
 
+#include "chat_controller.h"
+
 #include <QFont>
 #include <QFontDatabase>
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
+#include <QtQml>
 #include <QQuickStyle>
 #include <QQuickWindow>
 
@@ -24,6 +27,9 @@ int main(int argc, char* argv[]) {
     font.setPixelSize(13);
     font.setHintingPreference(QFont::PreferNoHinting);
     QGuiApplication::setFont(font);
+
+    Intercli::ChatController chat;
+    qmlRegisterSingletonInstance("Intercli.Backend", 1, 0, "Chat", &chat);
 
     QQmlApplicationEngine engine;
     QObject::connect(&engine, &QQmlApplicationEngine::objectCreationFailed, &app,
