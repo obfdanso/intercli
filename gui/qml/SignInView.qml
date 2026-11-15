@@ -214,6 +214,44 @@ Item {
                     }
                     ErrorText { text: root.byAddress ? "" : Chat.connectError }
 
+                    // After "identity has changed": show the new safety code to
+                    // compare with the host, then let them trust it.
+                    ColumnLayout {
+                        visible: Chat.identityChanged
+                        Layout.fillWidth: true
+                        Layout.topMargin: 6
+                        spacing: 6
+                        Text {
+                            textFormat: Text.PlainText
+                            Layout.fillWidth: true
+                            wrapMode: Text.Wrap
+                            text: "Its safety code is now:"
+                            color: Theme.textSecondary
+                            font.pixelSize: 12
+                        }
+                        Text {
+                            textFormat: Text.PlainText
+                            text: Chat.newSafetyCode
+                            color: Theme.text
+                            font.pixelSize: 14
+                            font.letterSpacing: 0.8
+                        }
+                        Text {
+                            textFormat: Text.PlainText
+                            Layout.fillWidth: true
+                            wrapMode: Text.Wrap
+                            text: "Ask the host to read out the safety code in their details panel. Only if it matches:"
+                            color: Theme.textTertiary
+                            font.pixelSize: 11
+                        }
+                        PrimaryButton {
+                            Layout.fillWidth: true
+                            text: "Trust New Identity"
+                            Accessible.name: "Trust new identity"
+                            onClicked: Chat.trustNewIdentity()
+                        }
+                    }
+
                     // --- or host your own ----------------------------------
                     RowLayout {
                         Layout.topMargin: 16
