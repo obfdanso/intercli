@@ -10,6 +10,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <memory>
 #include <vector>
 
 using namespace SecureComm;
@@ -142,6 +143,7 @@ static void room_code_tests() {
         locked_options.room_code = "K7P29Q";
         locked_options.max_wrong_codes_per_address = 6;
         locked_options.lockout = std::chrono::seconds(2);
+        locked_options.exempt_loopback = false;  // the test connects from this PC
         Running locked(locked_options);
 
         Ears a_ears;
@@ -169,6 +171,77 @@ static void room_code_tests() {
         d.connect("127.0.0.1", 18093, &err);
         d.request_name("d", "K7P29Q");
         check(d_ears.wait("registered:d"), "the lockout ends");
+    }
+
+    std::cout << "Guesses in parallel" << std::endl;
+    {
+        // Guesses sent at the same moment on separate connections must not
+        // slip past the limit: each one is counted before its code is compared.
+        ServerOptions par_options;
+        par_options.port = 18094;
+        par_options.room_code = "K7P29Q";
+        par_options.max_wrong_codes_per_address = 4;
+        par_options.lockout = std::chrono::seconds(30);
+        par_options.exempt_loopback = false;
+        Running par(par_options);
+        std::vector<std::unique_ptr<Ears>> ears;
+        std::vector<std::unique_ptr<ChatClient>> clients;
+        for (int i = 0; i < 8; ++i) {
+            ears.push_back(std::make_unique<Ears>());
+            clients.push_back(std::make_unique<ChatClient>(ears.back()->events_for()));
+            clients.back()->connect("127.0.0.1", 18094, &err);
+        }
+        for (int i = 0; i < 8; ++i) {
+            clients[i]->request_name("p" + std::to_string(i), "EEEEE" + std::to_string(i));
+        }
+        int compared = 0;
+        int refused = 0;
+        for (auto& e : ears) {
+            if (e->wait("failed:Wrong room code", 4000)) ++compared;
+            else if (e->heard("failed:Too many wrong room codes. Try again later.")) ++refused;
+        }
+        check(compared <= 4, "no more guesses are compared than the limit (" + std::to_string(compared) + ")");
+        check(compared + refused == 8, "every guess got an answer");
+    }
+
+    std::cout << "Too many half-open connections" << std::endl;
+    {
+        ServerOptions cap_options;
+        cap_options.port = 18095;
+        cap_options.room_code = "K7P29Q";
+        cap_options.exempt_loopback = false;
+        Running cap(cap_options);
+        std::vector<std::unique_ptr<ChatClient>> idle;
+        std::vector<std::unique_ptr<Ears>> idle_ears;
+        int connected = 0;
+        for (int i = 0; i < 12; ++i) {
+            idle_ears.push_back(std::make_unique<Ears>());
+            idle.push_back(std::make_unique<ChatClient>(idle_ears.back()->events_for()));
+            if (idle.back()->connect("127.0.0.1", 18095, &err)) ++connected;
+        }
+        check(connected <= 8, "at most 8 connections that haven't joined are kept per address (" +
+                                  std::to_string(connected) + ")");
+    }
+
+    std::cout << "This PC is never locked out" << std::endl;
+    {
+        ServerOptions own_options;
+        own_options.port = 18096;
+        own_options.room_code = "K7P29Q";
+        own_options.max_wrong_codes_per_address = 2;
+        Running own(own_options);
+        Ears w_ears;
+        ChatClient w(w_ears.events_for());
+        w.connect("127.0.0.1", 18096, &err);
+        w.request_name("w1", "ZZZZZZ");
+        w.request_name("w2", "ZZZZZY");
+        w.request_name("w3", "ZZZZZX");
+        check(w_ears.wait("failed:Wrong room code", 5000), "wrong codes from this PC are still refused");
+        Ears host_ears2;
+        ChatClient host2(host_ears2.events_for());
+        host2.connect("127.0.0.1", 18096, &err);
+        host2.request_name("host", "K7P29Q");
+        check(host_ears2.wait("registered:host"), "the host's own app can still join on its own machine");
     }
 
     std::cout << "Open server" << std::endl;

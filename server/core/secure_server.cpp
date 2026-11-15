@@ -93,6 +93,7 @@ struct ClientConnection {
     uint32_t          rx_seq = 0;      // last frame number received; receive thread only
     int               wrong_codes = 0; // wrong room codes tried; receive thread only
     std::string       address;         // the client's IP address
+    bool              counted_joined = false;  // released from the pending count
     std::atomic<bool> alive{true};
 };
 
@@ -116,34 +117,112 @@ struct SecureServer::Impl {
     std::map<std::string, std::shared_ptr<ClientConnection>> registry_;
     std::mutex registry_mutex_;
 
-    // Wrong room codes per address, across connections, so guessing can't be
+    // Room code guesses per address, across connections, so guessing can't be
     // sped up by opening more connections.
     struct Guesses {
         int count = 0;
         int lockouts = 0;
+        int pending = 0;  // connections from this address that haven't joined yet
         std::chrono::steady_clock::time_point locked_until{};
+        std::chrono::steady_clock::time_point last_seen{};
     };
     std::map<std::string, Guesses> guesses_;
     std::mutex guesses_mutex_;
+    static constexpr size_t kMaxTrackedAddresses = 4096;
+    static constexpr int kMaxPendingPerAddress = 8;
 
-    bool locked_out(const std::string& address) {
-        std::lock_guard<std::mutex> lock(guesses_mutex_);
-        auto it = guesses_.find(address);
-        return it != guesses_.end() && std::chrono::steady_clock::now() < it->second.locked_until;
+    bool exempt(const std::string& address) const {
+        return options_.exempt_loopback && address.rfind("127.", 0) == 0;
     }
 
-    void record_wrong_code(const std::string& address) {
+    // Forgets addresses that are neither locked out nor recently active, and
+    // keeps the table bounded. Caller holds guesses_mutex_.
+    void prune_guesses(std::chrono::steady_clock::time_point now) {
+        for (auto it = guesses_.begin(); it != guesses_.end();) {
+            const Guesses& g = it->second;
+            const bool idle = g.pending == 0 && now >= g.locked_until && now - g.last_seen > std::chrono::hours(1);
+            it = idle ? guesses_.erase(it) : std::next(it);
+        }
+        while (guesses_.size() > kMaxTrackedAddresses) {
+            auto oldest = guesses_.end();
+            for (auto it = guesses_.begin(); it != guesses_.end(); ++it) {
+                if (it->second.pending == 0 && now >= it->second.locked_until &&
+                    (oldest == guesses_.end() || it->second.last_seen < oldest->second.last_seen)) {
+                    oldest = it;
+                }
+            }
+            if (oldest == guesses_.end()) {
+                break;
+            }
+            guesses_.erase(oldest);
+        }
+    }
+
+    // A new connection that still has to join. False: too many from this address.
+    bool admit_pending(const std::string& address) {
+        if (options_.room_code.empty() || exempt(address)) {
+            return true;
+        }
         std::lock_guard<std::mutex> lock(guesses_mutex_);
+        const auto now = std::chrono::steady_clock::now();
+        prune_guesses(now);
         Guesses& g = guesses_[address];
+        g.last_seen = now;
+        if (g.pending >= kMaxPendingPerAddress) {
+            return false;
+        }
+        ++g.pending;
+        return true;
+    }
+
+    // The connection joined or went away.
+    void release_pending(const std::string& address) {
+        if (options_.room_code.empty() || exempt(address)) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(guesses_mutex_);
+        auto it = guesses_.find(address);
+        if (it != guesses_.end() && it->second.pending > 0) {
+            --it->second.pending;
+        }
+    }
+
+    // Checks the lockout and counts the guess in one step, before the code is
+    // compared, so guesses sent at once on several connections can't slip past
+    // the limit. False: locked out, don't compare.
+    bool begin_guess(const std::string& address) {
+        if (exempt(address)) {
+            return true;
+        }
+        std::lock_guard<std::mutex> lock(guesses_mutex_);
+        const auto now = std::chrono::steady_clock::now();
+        Guesses& g = guesses_[address];
+        g.last_seen = now;
+        if (now < g.locked_until) {
+            return false;
+        }
         if (++g.count >= options_.max_wrong_codes_per_address) {
             // Each lockout lasts twice as long as the one before, up to an hour.
             const auto factor = 1LL << (std::min)(g.lockouts, 6);
             const auto length = (std::min<std::chrono::seconds>)(options_.lockout * factor, std::chrono::hours(1));
-            g.locked_until = std::chrono::steady_clock::now() + length;
+            g.locked_until = now + length;
             g.count = 0;
             ++g.lockouts;
             LogLine(this, false) << "Locked out " << address << " for " << length.count()
                                  << " s after too many wrong room codes";
+        }
+        return true;
+    }
+
+    // A right code: that guess doesn't count against the address.
+    void guess_succeeded(const std::string& address) {
+        if (exempt(address)) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(guesses_mutex_);
+        auto it = guesses_.find(address);
+        if (it != guesses_.end()) {
+            it->second.count = 0;
         }
     }
 
@@ -269,6 +348,12 @@ struct SecureServer::Impl {
             LogLine(this, false) << "New client connected from " << addr_text
                       << ":" << ntohs(client_addr.sin_port);
 
+            if (!admit_pending(addr_text)) {
+                // Too many connections from one address that haven't joined.
+                close_socket(client_socket);
+                continue;
+            }
+
             auto conn = std::make_shared<ClientConnection>();
             conn->socket = client_socket;
             conn->address = addr_text;
@@ -333,6 +418,9 @@ struct SecureServer::Impl {
         }
 
         conn->alive = false;
+        if (!conn->counted_joined) {
+            release_pending(conn->address);
+        }
         const std::string departed = conn->name;
         unregister(conn);
         if (!departed.empty()) {
@@ -527,7 +615,7 @@ struct SecureServer::Impl {
                     if (chat.type == ChatType::REGISTER) {
                         // The room code comes first, so someone without it cannot
                         // even learn which names are taken.
-                        if (!options_.room_code.empty() && locked_out(conn->address)) {
+                        if (!options_.room_code.empty() && !begin_guess(conn->address)) {
                             ChatMessage refusal = make_chat(ChatType::REGISTER_FAIL);
                             set_chat_text(refusal, "Too many wrong room codes. Try again later.");
                             send_chat(conn, refusal);
@@ -536,7 +624,6 @@ struct SecureServer::Impl {
                         if (!options_.room_code.empty() &&
                             !room_code_matches(get_chat_field(chat.recipient, MAX_NAME_LEN))) {
                             // Slow down guessing, and give up on a connection after five tries.
-                            record_wrong_code(conn->address);
                             std::this_thread::sleep_for(std::chrono::seconds(1));
                             ChatMessage refusal = make_chat(ChatType::REGISTER_FAIL);
                             set_chat_text(refusal, "Wrong room code");
@@ -548,6 +635,9 @@ struct SecureServer::Impl {
                             continue;
                         }
 
+                        if (!options_.room_code.empty()) {
+                            guess_succeeded(conn->address);
+                        }
                         const std::string wanted = get_chat_text(chat);
                         std::string reason;
                         if (!is_valid_name(wanted)) {
@@ -565,6 +655,10 @@ struct SecureServer::Impl {
                         send_chat(conn, reply);
 
                         if (reason.empty()) {
+                            if (!conn->counted_joined) {
+                                conn->counted_joined = true;
+                                release_pending(conn->address);
+                            }
                             LogLine(this, false) << "Registered " << wanted << " on session "
                                       << session.session_id;
                             broadcast_presence(wanted, true, wanted);

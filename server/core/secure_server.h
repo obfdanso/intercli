@@ -24,6 +24,10 @@ struct ServerOptions {
     // an hour.
     int max_wrong_codes_per_address = 10;
     std::chrono::seconds lockout = std::chrono::seconds(60);
+    // Connections from this PC itself are never locked out: the hosting app
+    // joins its own chat that way, and a program on this PC could read the
+    // code from the host's settings anyway.
+    bool exempt_loopback = true;
     // The server's long-term identity (32-byte Ed25519 private key). Empty: a
     // temporary identity is made for this run.
     std::vector<uint8_t> identity_private;
