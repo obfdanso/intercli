@@ -26,7 +26,6 @@ Item {
         boundsBehavior: Flickable.StopAtBounds
         model: Chat.messages
         reuseItems: false
-        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
         delegate: MessageBubble {}
 
@@ -35,18 +34,36 @@ Item {
             NumberAnimation { property: "y"; from: ViewTransition.destination.y + 8; duration: 180; easing.type: Easing.OutCubic }
         }
 
-        onCountChanged: {
-            if (root.stick)
-                Qt.callLater(view.positionViewAtEnd)
-            else
-                root.unseen = true
+        // New rows at the end are new messages; rows at the top are older history
+        // being loaded, which must keep the reader's place and never raise the pill.
+        Connections {
+            target: view.model
+            function onRowsInserted(parent, first, last) {
+                const prepended = first === 0 && view.count > last + 1
+                if (prepended) {
+                    Qt.callLater(view.positionViewAtIndex, last + 1, ListView.Beginning)
+                } else if (root.stick) {
+                    Qt.callLater(view.positionViewAtEnd)
+                } else {
+                    root.unseen = true
+                }
+            }
         }
-        onMovementEnded: {
+
+        // Only the reader's own scrolling (drag, wheel, or letting go of the
+        // scroll bar) decides whether we follow new messages; the view's own
+        // positioning must not, as it can land a few pixels short of the end.
+        function settle() {
             root.stick = view.atYEnd
             if (root.stick)
                 root.unseen = false
-            if (view.atYBeginning)
+            if (view.atYBeginning && view.contentHeight > view.height)
                 root.reachedTop()
+        }
+        onMovementEnded: settle()
+        ScrollBar.vertical: ScrollBar {
+            policy: ScrollBar.AsNeeded
+            onPressedChanged: if (!pressed) view.settle()
         }
         onModelChanged: {
             root.stick = true
