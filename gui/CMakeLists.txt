@@ -7,6 +7,7 @@ qt_policy(SET QTP0004 NEW)
 qt_add_library(intercli_gui_lib STATIC
     text_utils.cpp
     conversation_list_model.cpp
+    message_model.cpp
 )
 target_include_directories(intercli_gui_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(intercli_gui_lib PUBLIC
@@ -65,6 +66,7 @@ endfunction()
 
 intercli_add_qt_test(test_text_utils)
 intercli_add_qt_test(test_conversation_list_model)
+intercli_add_qt_test(test_message_model)
 
 if(WIN32)
     # Copy Qt's DLLs and QML modules next to intercli.exe so it runs without Qt on PATH.
