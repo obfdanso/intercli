@@ -59,13 +59,7 @@ add_executable(client
     client/client.cpp
 )
 
-target_include_directories(client PRIVATE include)
-target_link_libraries(client
-    crypto_lib
-    OpenSSL::SSL
-    OpenSSL::Crypto
-    Threads::Threads
-)
+target_link_libraries(client intercli_client_core)
 
 # Add DH regression test
 enable_testing()
@@ -167,7 +161,6 @@ endif()
 if(WIN32)
     # Windows socket library, needed by MSVC and MinGW alike
     target_link_libraries(server ws2_32)
-    target_link_libraries(client ws2_32)
 
     # Copy the OpenSSL runtime DLLs next to each program, so they run (and ctest
     # passes) on a machine where OpenSSL's bin folder is not on PATH.
