@@ -143,7 +143,6 @@ static void room_code_tests() {
         locked_options.room_code = "K7P29Q";
         locked_options.max_wrong_codes_per_address = 6;
         locked_options.lockout = std::chrono::seconds(2);
-        locked_options.exempt_loopback = false;  // the test connects from this PC
         Running locked(locked_options);
 
         Ears a_ears;
@@ -182,7 +181,6 @@ static void room_code_tests() {
         par_options.room_code = "K7P29Q";
         par_options.max_wrong_codes_per_address = 4;
         par_options.lockout = std::chrono::seconds(30);
-        par_options.exempt_loopback = false;
         Running par(par_options);
         std::vector<std::unique_ptr<Ears>> ears;
         std::vector<std::unique_ptr<ChatClient>> clients;
@@ -209,7 +207,6 @@ static void room_code_tests() {
         ServerOptions cap_options;
         cap_options.port = 18095;
         cap_options.room_code = "K7P29Q";
-        cap_options.exempt_loopback = false;
         Running cap(cap_options);
         std::vector<std::unique_ptr<ChatClient>> idle;
         std::vector<std::unique_ptr<Ears>> idle_ears;
@@ -223,12 +220,13 @@ static void room_code_tests() {
                                   std::to_string(connected) + ")");
     }
 
-    std::cout << "This PC is never locked out" << std::endl;
+    std::cout << "Exempting this PC when asked" << std::endl;
     {
         ServerOptions own_options;
         own_options.port = 18096;
         own_options.room_code = "K7P29Q";
         own_options.max_wrong_codes_per_address = 2;
+        own_options.exempt_loopback = true;
         Running own(own_options);
         Ears w_ears;
         ChatClient w(w_ears.events_for());
