@@ -7,6 +7,7 @@
 #include "network_check.h"
 #include "secure_server.h"
 
+#include <QFile>
 #include <QSettings>
 #include <QSignalSpy>
 #include <QTemporaryDir>
@@ -86,6 +87,21 @@ private slots:
         QCOMPARE(first.roomCode(), second.roomCode());
         QCOMPARE(first.identityPublic().size(), 32);
         QCOMPARE(first.identityPublic(), second.identityPublic());
+    }
+
+    // A lost identity key means a new chat: people who joined before see a new
+    // chat rather than being refused with "identity has changed".
+    void a_lost_identity_key_starts_a_new_chat() {
+        QTemporaryDir d;
+        QString before;
+        {
+            HostSession first(d.path());
+            before = first.chatId();
+        }
+        QVERIFY(QFile::remove(d.filePath("host.key")));
+        HostSession second(d.path());
+        QVERIFY(second.chatId() != before);
+        QCOMPARE(second.identityPublic().size(), 32);
     }
 
     void joining_needs_the_room_code() {

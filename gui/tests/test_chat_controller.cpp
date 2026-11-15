@@ -379,7 +379,14 @@ private slots:
         QVERIFY2(wary.connectError().contains("identity has changed"), qPrintable(wary.connectError()));
         QTest::qWait(500);
         QCOMPARE(host.peopleInChat(), 2);
-        QSettings().remove("identities/chat:" + chatId);
+        // The new safety code is shown so it can be compared with the host, and
+        // after that the new identity can be trusted.
+        QVERIFY(wary.identityChanged());
+        QCOMPARE(wary.newSafetyCode(), host.safetyCode());
+        wary.trustNewIdentity();
+        QTRY_COMPARE_WITH_TIMEOUT(wary.state(), ChatController::Online, kWait);
+        QVERIFY(!wary.identityChanged());
+        wary.signOut();
 
         // A first join to a chat whose server proves a different key than the
         // one announced is refused before the code is sent (someone redirected

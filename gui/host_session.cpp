@@ -3,6 +3,7 @@
 #include "secure_server.h"
 #include "../crypto/crypto_utils.h"
 
+#include <QFileInfo>
 #include <QSettings>
 #include <QUuid>
 
@@ -16,9 +17,13 @@ const quint16 kPorts[] = {8080, 8082, 8083, 8084, 8085, 8086, 8087, 8088, 8089};
 } // namespace
 
 HostSession::HostSession(const QString& dataDir, QObject* parent) : QObject(parent) {
+    const QString keyPath = dataDir + QStringLiteral("/host.key");
+    // A new identity key means a new chat: otherwise everyone who joined before
+    // would be refused with "identity has changed".
+    const bool newIdentity = !QFileInfo::exists(keyPath);
     QSettings settings;
     chat_id_ = settings.value("host/chatId").toString();
-    if (chat_id_.isEmpty()) {
+    if (chat_id_.isEmpty() || newIdentity) {
         chat_id_ = QUuid::createUuid().toString(QUuid::WithoutBraces);
         settings.setValue("host/chatId", chat_id_);
     }
@@ -30,7 +35,7 @@ HostSession::HostSession(const QString& dataDir, QObject* parent) : QObject(pare
         settings.setValue("host/roomCode", room_code_);
     }
 
-    identity_private_ = loadOrCreateSecret(dataDir + QStringLiteral("/host.key"), 32);
+    identity_private_ = loadOrCreateSecret(keyPath, 32);
     if (identity_private_.size() == 32) {
         SecureComm::CryptoManager crypto;
         const std::vector<uint8_t> raw(identity_private_.begin(), identity_private_.end());

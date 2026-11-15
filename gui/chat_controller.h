@@ -55,6 +55,9 @@ class ChatController : public QObject {
     Q_PROPERTY(QString hostError READ hostError NOTIFY errorsChanged)
     Q_PROPERTY(bool publicNetwork READ publicNetwork NOTIFY publicNetworkChanged)
     Q_PROPERTY(bool firewallNoteNeeded READ firewallNoteNeeded NOTIFY hostingChanged)
+    // After "This chat's identity has changed": the safety code it has now.
+    Q_PROPERTY(bool identityChanged READ identityChanged NOTIFY errorsChanged)
+    Q_PROPERTY(QString newSafetyCode READ newSafetyCode NOTIFY errorsChanged)
 
 public:
     enum State { SignedOut, Connecting, Online, Disconnected, Reconnecting };
@@ -97,6 +100,8 @@ public:
     QString hostError() const { return host_error_; }
     bool publicNetwork() const { return public_network_; }
     bool firewallNoteNeeded() const;
+    bool identityChanged() const { return identity_changed_; }
+    QString newSafetyCode() const;
     QString historyIdentityForTests() const { return identity_; }
 
     // By address; room_code only for a chat that has one.
@@ -113,6 +118,9 @@ public:
     Q_INVOKABLE QString rememberedCode(const QString& chatId) const;
     Q_INVOKABLE void copyRoomCode() const;
     Q_INVOKABLE void refreshNetworkCheck();
+    // After comparing the new safety code with the host: remember the new
+    // identity for this chat and join again.
+    Q_INVOKABLE void trustNewIdentity();
     // Sends to the current conversation. False when blank, too long or offline.
     Q_INVOKABLE bool send(const QString& text);
     Q_INVOKABLE void rotateKey();
@@ -217,6 +225,8 @@ private:
     QByteArray server_identity_;
     bool identity_was_known_ = false;
     QByteArray announced_identity_;  // from the list; expected on a first join
+    bool identity_changed_ = false;
+    QByteArray new_identity_;
     QString identity_;
     bool history_loaded_ = false;
 

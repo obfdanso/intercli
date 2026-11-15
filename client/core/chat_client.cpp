@@ -753,11 +753,12 @@ bool ChatClient::perform_handshake(std::string* error) {
         if (!crypto_->identity_verify(identity, transcript, signature)) {
             return fail("The server could not prove its identity");
         }
+        // Kept even when refused, so the app can show the new safety code.
+        server_identity_ = identity;
         if (!expected_identity_.empty() && identity != expected_identity_) {
             return fail("This chat's identity has changed. If you didn't expect this, someone may be "
                         "intercepting the connection.");
         }
-        server_identity_ = identity;
 
         std::vector<uint8_t> salt = nonce;
         salt.insert(salt.end(), server_nonce.begin(), server_nonce.end());

@@ -61,7 +61,8 @@ public:
     // join). If set, connect() refuses a server that proves a different one,
     // before anything else is sent. Empty: accept any identity.
     void set_expected_identity(std::vector<uint8_t> public_raw);
-    // The identity key the server proved in the last successful handshake.
+    // The identity key the server proved in the last handshake (also when it
+    // was refused for not matching the expected one).
     std::vector<uint8_t> server_identity() const;
 
     // Blocking: resolves the host, connects, runs the handshake and starts the

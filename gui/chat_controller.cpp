@@ -235,6 +235,7 @@ bool ChatController::beginSignIn(const QString& name) {
     QSettings settings;
     settings.setValue("lastName", my_name_);
 
+    identity_changed_ = false;
     setErrors(QString(), QString());
     needs_sign_in_ = false;
     register_retries_ = 0;
@@ -408,6 +409,12 @@ void ChatController::onConnectResult(bool ok, const QString& error) {
     }
     // The client library says what went wrong: not found, unreachable, no answer.
     const QString reason = error.isEmpty() ? QStringLiteral("Couldn't reach %1:%2").arg(host_).arg(port_) : error;
+    if (error.startsWith(QStringLiteral("This chat's identity")) && client_) {
+        // Keep what it presented, so its safety code can be compared and trusted.
+        const std::vector<uint8_t> presented = client_->server_identity();
+        new_identity_ = QByteArray(reinterpret_cast<const char*>(presented.data()), static_cast<qsizetype>(presented.size()));
+        identity_changed_ = new_identity_.size() == 32;
+    }
     abandonConnection();
     if (state_ == Connecting) {
         if (hosting_ && host_session_) {
@@ -525,7 +532,25 @@ void ChatController::setWindowActive(bool active) {
 }
 
 void ChatController::clearErrors() {
+    identity_changed_ = false;
     setErrors(QString(), QString());
+}
+
+QString ChatController::newSafetyCode() const {
+    if (new_identity_.size() != 32) {
+        return QString();
+    }
+    const std::vector<uint8_t> raw(new_identity_.begin(), new_identity_.end());
+    return QString::fromStdString(SecureComm::safety_code(raw));
+}
+
+void ChatController::trustNewIdentity() {
+    if (!identity_changed_ || state_ != SignedOut) {
+        return;
+    }
+    QSettings().setValue("identities/" + pinKey(), new_identity_.toHex());
+    identity_changed_ = false;
+    beginSignIn(my_name_);
 }
 
 void ChatController::setSearch(const QString& text) {
