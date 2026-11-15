@@ -9,12 +9,16 @@ qt_add_library(intercli_gui_lib STATIC
     conversation_list_model.cpp
     message_model.cpp
     chat_controller.cpp
+    windows_frame.cpp
 )
 target_include_directories(intercli_gui_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(intercli_gui_lib PUBLIC
     intercli_client_core
     Qt6::Quick
 )
+if(WIN32)
+    target_link_libraries(intercli_gui_lib PUBLIC dwmapi user32)
+endif()
 
 qt_add_executable(intercli_gui WIN32
     main.cpp
@@ -32,6 +36,8 @@ qt_add_qml_module(intercli_gui
     QML_FILES
         qml/Main.qml
         qml/Theme.qml
+        qml/TitleBar.qml
+        qml/CaptionButton.qml
     RESOURCES
         fonts/InterVariable.ttf
 )
