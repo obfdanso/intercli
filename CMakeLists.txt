@@ -38,6 +38,22 @@ target_link_libraries(server
     Threads::Threads
 )
 
+# Client protocol library shared by the terminal client and the desktop app
+add_library(intercli_client_core STATIC
+    client/core/chat_client.cpp
+)
+
+target_include_directories(intercli_client_core PUBLIC include client/core)
+target_link_libraries(intercli_client_core PUBLIC
+    crypto_lib
+    OpenSSL::SSL
+    OpenSSL::Crypto
+    Threads::Threads
+)
+if(WIN32)
+    target_link_libraries(intercli_client_core PUBLIC ws2_32)
+endif()
+
 # Add client executable
 add_executable(client
     client/client.cpp
@@ -110,13 +126,29 @@ target_link_libraries(test_directional_keys
 
 add_test(NAME directional_keys COMMAND test_directional_keys)
 
+add_executable(test_roster
+    tests/test_roster.cpp
+)
+target_link_libraries(test_roster intercli_client_core)
+add_test(NAME roster COMMAND test_roster)
+
+add_executable(test_chat_client
+    tests/test_chat_client.cpp
+)
+target_link_libraries(test_chat_client intercli_client_core)
+
 # Drives three real clients through pipes. Needs bash; skipped where absent.
 find_program(BASH_PROGRAM bash)
 if(BASH_PROGRAM)
     add_test(NAME chat_integration
              COMMAND ${BASH_PROGRAM} ${CMAKE_SOURCE_DIR}/tests/integration_chat.sh
                      $<TARGET_FILE_DIR:server>)
-    set_tests_properties(chat_integration PROPERTIES TIMEOUT 180)
+    set_tests_properties(chat_integration PROPERTIES TIMEOUT 180 RESOURCE_LOCK port8080)
+
+    add_test(NAME chat_client
+             COMMAND ${BASH_PROGRAM} ${CMAKE_SOURCE_DIR}/tests/run_with_server.sh
+                     $<TARGET_FILE:server> $<TARGET_FILE:test_chat_client>)
+    set_tests_properties(chat_client PROPERTIES TIMEOUT 120 RESOURCE_LOCK port8080)
 endif()
 
 # Set compiler flags and platform-specific settings
@@ -124,10 +156,12 @@ if(MSVC)
     target_compile_options(server PRIVATE /W4)
     target_compile_options(client PRIVATE /W4)
     target_compile_options(crypto_lib PRIVATE /W4)
+    target_compile_options(intercli_client_core PRIVATE /W4)
 else()
     target_compile_options(server PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(client PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(crypto_lib PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(intercli_client_core PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 if(WIN32)
@@ -142,7 +176,7 @@ if(WIN32)
         "${OPENSSL_INSTALL_DIR}/bin/libcrypto*.dll"
         "${OPENSSL_INSTALL_DIR}/bin/libssl*.dll")
     if(OPENSSL_RUNTIME_DLLS)
-        foreach(exe server client test_dh test_aes_gcm test_chat_envelope test_directional_keys)
+        foreach(exe server client test_dh test_aes_gcm test_chat_envelope test_directional_keys test_roster test_chat_client)
             add_custom_command(TARGET ${exe} POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different ${OPENSSL_RUNTIME_DLLS} $<TARGET_FILE_DIR:${exe}>)
         endforeach()
