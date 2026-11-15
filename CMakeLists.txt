@@ -123,6 +123,13 @@ target_link_libraries(test_directional_keys
 
 add_test(NAME directional_keys COMMAND test_directional_keys)
 
+add_executable(test_identity
+    tests/test_identity.cpp
+)
+target_include_directories(test_identity PRIVATE include crypto)
+target_link_libraries(test_identity crypto_lib)
+add_test(NAME identity COMMAND test_identity)
+
 add_executable(test_roster
     tests/test_roster.cpp
 )
@@ -172,7 +179,7 @@ if(WIN32)
         "${OPENSSL_INSTALL_DIR}/bin/libcrypto*.dll"
         "${OPENSSL_INSTALL_DIR}/bin/libssl*.dll")
     if(OPENSSL_RUNTIME_DLLS)
-        foreach(exe server client test_dh test_aes_gcm test_chat_envelope test_directional_keys test_roster test_chat_client)
+        foreach(exe server client test_dh test_aes_gcm test_chat_envelope test_directional_keys test_roster test_chat_client test_identity)
             add_custom_command(TARGET ${exe} POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different ${OPENSSL_RUNTIME_DLLS} $<TARGET_FILE_DIR:${exe}>)
         endforeach()

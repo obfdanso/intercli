@@ -1,4 +1,6 @@
 #include "crypto_utils.h"
+#include <cctype>
+#include <cstdio>
 #include <iostream>
 #include <iomanip>
 #include <sstream>
@@ -131,7 +133,8 @@ std::vector<uint8_t> CryptoManager::generate_symmetric_key(size_t size) {
 
 std::vector<uint8_t> CryptoManager::encrypt_aes_gcm(const std::vector<uint8_t>& data,
                                                    const std::vector<uint8_t>& key,
-                                                   const std::vector<uint8_t>& iv) {
+                                                   const std::vector<uint8_t>& iv,
+                                                   const std::vector<uint8_t>& aad) {
     EVPContext ctx;
     const EVP_CIPHER* cipher = EVP_aes_256_gcm();
 
@@ -141,6 +144,11 @@ std::vector<uint8_t> CryptoManager::encrypt_aes_gcm(const std::vector<uint8_t>& 
 
     std::vector<uint8_t> encrypted(data.size() + EVP_MAX_BLOCK_LENGTH);
     int len;
+
+    if (!aad.empty() &&
+        EVP_EncryptUpdate(ctx.get(), nullptr, &len, aad.data(), static_cast<int>(aad.size())) != 1) {
+        throw CryptoException("Failed to add associated data");
+    }
     
     if (EVP_EncryptUpdate(ctx.get(), encrypted.data(), &len, data.data(), static_cast<int>(data.size())) != 1) {
         throw CryptoException("Failed to encrypt data");
@@ -166,7 +174,8 @@ std::vector<uint8_t> CryptoManager::encrypt_aes_gcm(const std::vector<uint8_t>& 
 
 std::vector<uint8_t> CryptoManager::decrypt_aes_gcm(const std::vector<uint8_t>& encrypted_data,
                                                    const std::vector<uint8_t>& key,
-                                                   const std::vector<uint8_t>& iv) {
+                                                   const std::vector<uint8_t>& iv,
+                                                   const std::vector<uint8_t>& aad) {
     EVPContext ctx;
     const EVP_CIPHER* cipher = EVP_aes_256_gcm();
 
@@ -184,6 +193,11 @@ std::vector<uint8_t> CryptoManager::decrypt_aes_gcm(const std::vector<uint8_t>& 
     std::vector<uint8_t> decrypted(ciphertext_len);
     int len;
 
+    if (!aad.empty() &&
+        EVP_DecryptUpdate(ctx.get(), nullptr, &len, aad.data(), static_cast<int>(aad.size())) != 1) {
+        throw CryptoException("Failed to add associated data");
+    }
+
     if (EVP_DecryptUpdate(ctx.get(), decrypted.data(), &len, encrypted_data.data(), static_cast<int>(ciphertext_len)) != 1) {
         throw CryptoException("Failed to decrypt data");
     }
@@ -200,6 +214,113 @@ std::vector<uint8_t> CryptoManager::decrypt_aes_gcm(const std::vector<uint8_t>& 
 
     decrypted.resize(len + final_len);
     return decrypted;
+}
+
+IdentityKey CryptoManager::generate_identity() {
+    return identity_from_private(generate_random_bytes(32));
+}
+
+IdentityKey CryptoManager::identity_from_private(const std::vector<uint8_t>& private_raw) {
+    if (private_raw.size() != 32) {
+        throw CryptoException("Identity private key must be 32 bytes");
+    }
+    EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, nullptr, private_raw.data(), 32);
+    if (!pkey) {
+        throw CryptoException("Failed to load identity key");
+    }
+    IdentityKey key;
+    key.private_raw = private_raw;
+    key.public_raw.resize(32);
+    size_t len = 32;
+    const int ok = EVP_PKEY_get_raw_public_key(pkey, key.public_raw.data(), &len);
+    EVP_PKEY_free(pkey);
+    if (ok != 1 || len != 32) {
+        throw CryptoException("Failed to derive identity public key");
+    }
+    return key;
+}
+
+std::vector<uint8_t> CryptoManager::identity_sign(const IdentityKey& key, const std::vector<uint8_t>& message) {
+    EVP_PKEY* pkey = EVP_PKEY_new_raw_private_key(EVP_PKEY_ED25519, nullptr, key.private_raw.data(),
+                                                  key.private_raw.size());
+    if (!pkey) {
+        throw CryptoException("Failed to load identity key");
+    }
+    EVPMDContext md;
+    std::vector<uint8_t> sig(64);
+    size_t sig_len = sig.size();
+    const bool ok = EVP_DigestSignInit(md.get(), nullptr, nullptr, nullptr, pkey) == 1 &&
+                    EVP_DigestSign(md.get(), sig.data(), &sig_len, message.data(), message.size()) == 1;
+    EVP_PKEY_free(pkey);
+    if (!ok || sig_len != 64) {
+        throw CryptoException("Failed to sign with identity key");
+    }
+    return sig;
+}
+
+bool CryptoManager::identity_verify(const std::vector<uint8_t>& public_raw, const std::vector<uint8_t>& message,
+                                    const std::vector<uint8_t>& signature) {
+    if (public_raw.size() != 32 || signature.size() != 64) {
+        return false;
+    }
+    EVP_PKEY* pkey = EVP_PKEY_new_raw_public_key(EVP_PKEY_ED25519, nullptr, public_raw.data(), 32);
+    if (!pkey) {
+        return false;
+    }
+    EVPMDContext md;
+    const bool ok = EVP_DigestVerifyInit(md.get(), nullptr, nullptr, nullptr, pkey) == 1 &&
+                    EVP_DigestVerify(md.get(), signature.data(), signature.size(), message.data(),
+                                     message.size()) == 1;
+    EVP_PKEY_free(pkey);
+    return ok;
+}
+
+std::string CryptoManager::generate_room_code() {
+    static const char alphabet[] = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+    constexpr unsigned size = sizeof(alphabet) - 1;  // 31
+    std::string code;
+    while (code.size() < 6) {
+        // Rejection sampling keeps every character equally likely.
+        const uint8_t b = generate_random_bytes(1)[0];
+        if (b < 248) {  // 248 = 8 * 31
+            code.push_back(alphabet[b % size]);
+        }
+    }
+    return code;
+}
+
+std::string safety_code(const std::vector<uint8_t>& public_raw) {
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int len = 0;
+    EVP_Digest(public_raw.data(), public_raw.size(), digest, &len, EVP_sha256(), nullptr);
+    std::string out;
+    for (int group = 0; group < 5; ++group) {
+        // Four digits from two bytes of the hash each.
+        const unsigned value = ((static_cast<unsigned>(digest[group * 2]) << 8) | digest[group * 2 + 1]) % 10000;
+        char buf[6];
+        std::snprintf(buf, sizeof(buf), "%04u", value);
+        if (!out.empty()) {
+            out += ' ';
+        }
+        out += buf;
+    }
+    return out;
+}
+
+std::string normalize_room_code(const std::string& code) {
+    std::string out;
+    for (char c : code) {
+        if (c == '-' || c == ' ') {
+            continue;
+        }
+        out.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(c))));
+    }
+    return out;
+}
+
+std::string format_room_code(const std::string& code) {
+    const std::string n = normalize_room_code(code);
+    return n.size() == 6 ? n.substr(0, 3) + "-" + n.substr(3) : n;
 }
 
 std::vector<uint8_t> CryptoManager::perform_dh_key_exchange(const std::vector<uint8_t>& private_key,

@@ -54,6 +54,20 @@ struct SessionKeys {
     std::vector<uint8_t> rx_key;
 };
 
+// A server's long-term Ed25519 identity, raw 32-byte keys.
+struct IdentityKey {
+    std::vector<uint8_t> private_raw;
+    std::vector<uint8_t> public_raw;
+};
+
+// 20 digits in groups of four from a hash of an identity key, for people to
+// compare out loud ("1234 5678 9012 3456 7890").
+std::string safety_code(const std::vector<uint8_t>& public_raw);
+// Upper-cases and drops dashes and spaces, so "k7p-29q" matches "K7P29Q".
+std::string normalize_room_code(const std::string& code);
+// "K7P29Q" -> "K7P-29Q".
+std::string format_room_code(const std::string& code);
+
 // Main cryptographic manager class
 class CryptoManager {
 public:
@@ -66,12 +80,26 @@ public:
     std::vector<uint8_t> generate_symmetric_key(size_t size = KEY_SIZE);
     
     // Encryption/Decryption
-    std::vector<uint8_t> encrypt_aes_gcm(const std::vector<uint8_t>& data, 
+    // aad (associated data) is authenticated but not encrypted: decryption
+    // fails unless exactly the same bytes are given again.
+    std::vector<uint8_t> encrypt_aes_gcm(const std::vector<uint8_t>& data,
                                         const std::vector<uint8_t>& key,
-                                        const std::vector<uint8_t>& iv);
+                                        const std::vector<uint8_t>& iv,
+                                        const std::vector<uint8_t>& aad = {});
     std::vector<uint8_t> decrypt_aes_gcm(const std::vector<uint8_t>& encrypted_data,
                                         const std::vector<uint8_t>& key,
-                                        const std::vector<uint8_t>& iv);
+                                        const std::vector<uint8_t>& iv,
+                                        const std::vector<uint8_t>& aad = {});
+
+    // Ed25519 identity keys (the server's long-term identity).
+    IdentityKey generate_identity();
+    IdentityKey identity_from_private(const std::vector<uint8_t>& private_raw);
+    std::vector<uint8_t> identity_sign(const IdentityKey& key, const std::vector<uint8_t>& message);
+    bool identity_verify(const std::vector<uint8_t>& public_raw, const std::vector<uint8_t>& message,
+                         const std::vector<uint8_t>& signature);
+
+    // Six characters from an alphabet without look-alikes (no 0/O, 1/I/L).
+    std::string generate_room_code();
     
     // Key exchange
     std::vector<uint8_t> perform_dh_key_exchange(const std::vector<uint8_t>& private_key,

@@ -71,6 +71,28 @@ int main() {
         }
         check(rejected, "decryption under the wrong key is rejected");
 
+        std::cout << "Associated data" << std::endl;
+        const std::vector<uint8_t> aad = {0x02, 0x04, 0x01, 0x00, 0x00, 0x00};
+        std::vector<uint8_t> bound = crypto.encrypt_aes_gcm(plaintext, key, iv, aad);
+        check(crypto.decrypt_aes_gcm(bound, key, iv, aad) == plaintext,
+              "decrypt with the same associated data recovers the plaintext");
+        std::vector<uint8_t> other_aad = aad;
+        other_aad[2] = 0x02;  // a different sequence number
+        rejected = false;
+        try {
+            crypto.decrypt_aes_gcm(bound, key, iv, other_aad);
+        } catch (const std::exception&) {
+            rejected = true;
+        }
+        check(rejected, "different associated data is rejected");
+        rejected = false;
+        try {
+            crypto.decrypt_aes_gcm(bound, key, iv);
+        } catch (const std::exception&) {
+            rejected = true;
+        }
+        check(rejected, "missing associated data is rejected");
+
     } catch (const std::exception& e) {
         std::cout << "  FAIL: unexpected exception: " << e.what() << std::endl;
         ++failures;
