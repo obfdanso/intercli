@@ -207,6 +207,20 @@ Meanwhile on alice's screen:
 [bob -> you] just for you
 ```
 
+### Saved messages (desktop app)
+
+The first time you sign in to a server with a name, the desktop app asks whether to
+save your messages on this computer. If you choose **Don't Save**, nothing is written to
+disk. If you choose **Save Messages**, your chats with that name on that server come back
+the next time you sign in. You can change this later with the switch in the details
+panel, and turning it off offers to delete what is already saved.
+
+Saved messages are kept in `%APPDATA%\intercli\history.db`. The message text is
+encrypted with AES-256-GCM under a key that Windows protects for your user account
+(DPAPI), so another Windows user can't read it. Names aren't verified, though: anyone
+using the same Windows account who signs in with the same name and server sees that
+history.
+
 ### Who can read your messages
 
 The server decrypts every message in order to route it, so it can read all

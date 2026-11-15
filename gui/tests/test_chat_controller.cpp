@@ -5,6 +5,7 @@
 #include "chat_controller.h"
 #include "conversation_list_model.h"
 #include "message_model.h"
+#include "history_store.h"
 
 #include <QElapsedTimer>
 #include <QSettings>
@@ -189,6 +190,89 @@ private slots:
         bob->rotateKey();
         QTRY_COMPARE_WITH_TIMEOUT(bob->session().value("sendRotations").toInt(), before + 2, kWait);
         QTRY_COMPARE_WITH_TIMEOUT(lastText(bob->messages()), QStringLiteral("Your send key rotated"), kWait);
+    }
+
+    // --- saved history -------------------------------------------------
+
+    static QString identity(const QString& name) {
+        return identityKey("127.0.0.1", SecureComm::DEFAULT_PORT, name);
+    }
+
+    void history_unasked_saves_nothing() {
+        QTemporaryDir d;
+        HistoryStore store(d.filePath("h.db"), QByteArray(32, ''), "hist-unasked");
+        QString err;
+        QVERIFY(store.open(&err));
+        ChatController c(&store);
+        QVERIFY(c.historyAvailable());
+        c.signIn("127.0.0.1", SecureComm::DEFAULT_PORT, "hzed");
+        QTRY_COMPARE_WITH_TIMEOUT(c.state(), ChatController::Online, kWait);
+        QCOMPARE(c.historyChoice(), int(HistoryChoice::Unasked));
+        alice->client->send_direct("hzed", "not saved");
+        QTRY_COMPARE_WITH_TIMEOUT(unreadOf(c.conversations(), "alice"), 1, kWait);
+        QCOMPARE(store.totalMessageRowsForTest(), 0);
+    }
+
+    void history_save_round_trip() {
+        QTemporaryDir d;
+        HistoryStore store(d.filePath("h.db"), QByteArray(32, ''), "hist-save");
+        QString err;
+        QVERIFY(store.open(&err));
+        ChatController c(&store);
+        c.signIn("127.0.0.1", SecureComm::DEFAULT_PORT, "hsave");
+        QTRY_COMPARE_WITH_TIMEOUT(c.state(), ChatController::Online, kWait);
+        c.setHistoryChoice(int(HistoryChoice::Save), false);
+        QCOMPARE(c.historyChoice(), int(HistoryChoice::Save));
+        alice->client->send_direct("hsave", "saved hi");
+        QTRY_COMPARE_WITH_TIMEOUT(unreadOf(c.conversations(), "alice"), 1, kWait);
+        c.setCurrentConversation("alice");
+        QVERIFY(c.send("saved reply"));
+
+        c.signOut();
+        QCOMPARE(c.conversations()->rowCount(), 1);
+        c.signIn("127.0.0.1", SecureComm::DEFAULT_PORT, "hsave");
+        QTRY_COMPARE_WITH_TIMEOUT(c.state(), ChatController::Online, kWait);
+        QCOMPARE(c.historyChoice(), int(HistoryChoice::Save));
+        QVERIFY(rowOf(c.conversations(), "alice") > 0);
+        c.setCurrentConversation("alice");
+        QCOMPARE(c.messages()->count(), 2);
+        QCOMPARE(c.messages()->entryAt(0).text, QStringLiteral("saved hi"));
+        QCOMPARE(c.messages()->entryAt(1).text, QStringLiteral("saved reply"));
+        QCOMPARE(int(c.messages()->entryAt(1).kind), int(MessageModel::Outgoing));
+        c.signOut();
+    }
+
+    void history_dont_save() {
+        QTemporaryDir d;
+        HistoryStore store(d.filePath("h.db"), QByteArray(32, ''), "hist-none");
+        QString err;
+        QVERIFY(store.open(&err));
+        ChatController c(&store);
+        c.signIn("127.0.0.1", SecureComm::DEFAULT_PORT, "hnone");
+        QTRY_COMPARE_WITH_TIMEOUT(c.state(), ChatController::Online, kWait);
+        c.setHistoryChoice(int(HistoryChoice::DontSave), false);
+        alice->client->send_direct("hnone", "ephemeral");
+        QTRY_COMPARE_WITH_TIMEOUT(unreadOf(c.conversations(), "alice"), 1, kWait);
+        c.setCurrentConversation("alice");
+        QVERIFY(c.send("also ephemeral"));
+        QCOMPARE(store.totalMessageRowsForTest(), 0);
+    }
+
+    void history_turn_off_and_delete() {
+        QTemporaryDir d;
+        HistoryStore store(d.filePath("h.db"), QByteArray(32, ''), "hist-del");
+        QString err;
+        QVERIFY(store.open(&err));
+        ChatController c(&store);
+        c.signIn("127.0.0.1", SecureComm::DEFAULT_PORT, "hdel");
+        QTRY_COMPARE_WITH_TIMEOUT(c.state(), ChatController::Online, kWait);
+        c.setHistoryChoice(int(HistoryChoice::Save), false);
+        c.setCurrentConversation("alice");
+        QVERIFY(c.send("soon gone"));
+        QVERIFY(store.totalMessageRowsForTest() > 0);
+        c.setHistoryChoice(int(HistoryChoice::DontSave), true);
+        QCOMPARE(store.loadPage(identity("hdel"), "alice", 50).size(), 0);
+        QCOMPARE(store.totalMessageRowsForTest(), 0);
     }
 
     void connection_loss_reconnects() {

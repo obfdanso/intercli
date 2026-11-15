@@ -19,8 +19,9 @@ std::string ss(const QString& s) {
 
 } // namespace
 
-ChatController::ChatController(QObject* parent)
-    : QObject(parent), list_(new ConversationListModel(this)), filter_(new QSortFilterProxyModel(this)) {
+ChatController::ChatController(HistoryStore* history, QObject* parent)
+    : QObject(parent), list_(new ConversationListModel(this)), filter_(new QSortFilterProxyModel(this)),
+      history_(history) {
     filter_->setSourceModel(list_);
     filter_->setFilterRole(ConversationListModel::TitleRole);
     filter_->setFilterCaseSensitivity(Qt::CaseInsensitive);
@@ -178,6 +179,9 @@ void ChatController::signIn(const QString& host, int port, const QString& name) 
     setErrors(QString(), QString());
     needs_sign_in_ = false;
     register_retries_ = 0;
+    identity_ = identityKey(host_, port_, my_name_);
+    history_loaded_ = false;
+    emit historyChoiceChanged();
     setState(Connecting);
     startConnect(name);
 }
@@ -204,6 +208,10 @@ void ChatController::onRegistered(const QString& name) {
     my_name_ = name;
     emit myNameChanged();
     disconnect_reason_.clear();
+    if (!history_loaded_) {
+        history_loaded_ = true;
+        loadSavedHistory();
+    }
     setState(Online);
     if (client_) {
         client_->request_roster();
@@ -283,26 +291,97 @@ void ChatController::setSearch(const QString& text) {
     filter_->setFilterFixedString(text);
 }
 
+int ChatController::historyChoice() const {
+    return history_ && !identity_.isEmpty() ? static_cast<int>(history_->choice(identity_)) : 0;
+}
+
+bool ChatController::saving() const {
+    return history_ && !identity_.isEmpty() && history_->choice(identity_) == HistoryChoice::Save;
+}
+
+void ChatController::setHistoryChoice(int choice, bool deleteExisting) {
+    if (!history_ || identity_.isEmpty() || choice < 0 || choice > 2) {
+        return;
+    }
+    const auto c = static_cast<HistoryChoice>(choice);
+    history_->setChoice(identity_, c);
+    if (c == HistoryChoice::DontSave && deleteExisting) {
+        history_->deleteAll(identity_);
+    }
+    emit historyChoiceChanged();
+}
+
+// Brings back the conversations saved for this name on this server: the sidebar
+// rows (offline until the roster says otherwise) and each one's latest messages.
+void ChatController::loadSavedHistory() {
+    if (!saving()) {
+        return;
+    }
+    for (const ConversationSummary& c : history_->conversations(identity_)) {
+        QString preview = c.lastText;
+        if (c.lastKind == MessageModel::Outgoing) {
+            preview = QStringLiteral("You: ") + c.lastText;
+        } else if (c.conversation.isEmpty()) {
+            preview = c.lastSender + QStringLiteral(": ") + c.lastText;
+        }
+        list_->touch(c.conversation, preview, c.lastTime, false);
+
+        QList<ChatEntry> entries;
+        for (const StoredMessage& m : history_->loadPage(identity_, c.conversation, 50)) {
+            entries.append(ChatEntry{m.id, static_cast<MessageModel::Kind>(m.kind), m.sender, m.text, m.time});
+        }
+        modelFor(c.conversation)->prepend(entries);
+    }
+}
+
+void ChatController::loadOlder() {
+    if (!saving()) {
+        return;
+    }
+    MessageModel* model = modelFor(current_);
+    const qint64 oldest = model->oldestId();
+    if (oldest <= 0) {
+        return;  // nothing saved above what is shown
+    }
+    QList<ChatEntry> entries;
+    for (const StoredMessage& m : history_->loadPage(identity_, current_, 50, oldest)) {
+        entries.append(ChatEntry{m.id, static_cast<MessageModel::Kind>(m.kind), m.sender, m.text, m.time});
+    }
+    model->prepend(entries);
+}
+
 void ChatController::addRow(const QString& conversation, MessageModel::Kind kind, const QString& sender,
-                            const QString& text) {
+                            const QString& text, bool persist) {
     ChatEntry e;
-    e.id = next_local_id_--;
     e.kind = kind;
     e.sender = sender;
     e.text = text;
     e.time = QDateTime::currentDateTime();
+    e.id = 0;
+    if (persist && saving()) {
+        StoredMessage m;
+        m.conversation = conversation;
+        m.kind = static_cast<int>(kind);
+        m.sender = sender;
+        m.text = text;
+        m.time = e.time;
+        e.id = history_->append(identity_, m);
+    }
+    if (e.id <= 0) {
+        e.id = next_local_id_--;
+    }
     modelFor(conversation)->append(e);
 }
 
 void ChatController::onDirect(const QString& from, const QString& text) {
-    addRow(from, MessageModel::Incoming, from, text);
+    addRow(from, MessageModel::Incoming, from, text, true);
     const bool unseen = from != current_ || !window_active_;
     list_->touch(from, text, QDateTime::currentDateTime(), unseen);
     emit messageArrived(from);
 }
 
 void ChatController::onBroadcast(const QString& from, const QString& text) {
-    addRow(QString(), MessageModel::Incoming, from, text);
+    addRow(QString(), MessageModel::Incoming, from, text, true);
     const bool unseen = !current_.isEmpty() || !window_active_;
     list_->touch(QString(), from + QStringLiteral(": ") + text, QDateTime::currentDateTime(), unseen);
     emit messageArrived(QString());
@@ -319,18 +398,18 @@ void ChatController::onPresence(const QString& name, bool joined, const QString&
     }
     const bool known = models_.contains(name);
     list_->setOnline(name, joined);
-    addRow(QString(), MessageModel::System, QString(), raw);
+    addRow(QString(), MessageModel::System, QString(), raw, true);
     if (known) {
-        addRow(name, MessageModel::System, QString(), raw);
+        addRow(name, MessageModel::System, QString(), raw, true);
     }
 }
 
 void ChatController::onNotice(const QString& text) {
-    addRow(last_target_, MessageModel::System, QString(), text);
+    addRow(last_target_, MessageModel::System, QString(), text, false);
 }
 
 void ChatController::onSendKeyRotated() {
-    addRow(current_, MessageModel::System, QString(), QStringLiteral("Your send key rotated"));
+    addRow(current_, MessageModel::System, QString(), QStringLiteral("Your send key rotated"), false);
     emit sessionChanged();
 }
 
@@ -371,7 +450,7 @@ bool ChatController::send(const QString& text) {
         return false;
     }
     last_target_ = current_;
-    addRow(current_, MessageModel::Outgoing, my_name_, text);
+    addRow(current_, MessageModel::Outgoing, my_name_, text, true);
     list_->touch(current_, QStringLiteral("You: ") + text, QDateTime::currentDateTime(), false);
     emit sessionChanged();
     return true;
@@ -402,6 +481,7 @@ void ChatController::signOut() {
     }
     current_ = QStringLiteral("");
     last_target_.clear();
+    history_loaded_ = false;
     disconnect_reason_.clear();
     needs_sign_in_ = false;
     setErrors(QString(), QString());

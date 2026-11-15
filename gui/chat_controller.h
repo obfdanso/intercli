@@ -2,6 +2,7 @@
 
 #include "chat_client.h"
 #include "conversation_list_model.h"
+#include "history_store.h"
 #include "message_model.h"
 
 #include <QAbstractItemModel>
@@ -38,12 +39,15 @@ class ChatController : public QObject {
     Q_PROPERTY(QStringList onlineNames READ onlineNames NOTIFY onlineCountChanged)
     Q_PROPERTY(QVariantMap session READ session NOTIFY sessionChanged)
     Q_PROPERTY(bool windowActive READ windowActive WRITE setWindowActive NOTIFY windowActiveChanged)
+    Q_PROPERTY(bool historyAvailable READ historyAvailable CONSTANT)
+    Q_PROPERTY(int historyChoice READ historyChoice NOTIFY historyChoiceChanged)
 
 public:
     enum State { SignedOut, Connecting, Online, Disconnected, Reconnecting };
     Q_ENUM(State)
 
-    explicit ChatController(QObject* parent = nullptr);
+    // history may be null (saving is then unavailable); it must outlive the controller.
+    explicit ChatController(HistoryStore* history = nullptr, QObject* parent = nullptr);
     ~ChatController() override;
 
     State state() const { return state_; }
@@ -62,6 +66,8 @@ public:
     QStringList onlineNames() const { return list_->onlineNames(); }
     QVariantMap session() const;
     bool windowActive() const { return window_active_; }
+    bool historyAvailable() const { return history_ != nullptr; }
+    int historyChoice() const;
     void setWindowActive(bool active);
 
     Q_INVOKABLE void signIn(const QString& host, int port, const QString& name);
@@ -73,6 +79,11 @@ public:
     Q_INVOKABLE void setSearch(const QString& text);
     // Called when the user edits a sign-in field, so a stale error goes away.
     Q_INVOKABLE void clearErrors();
+    // HistoryChoice values. Turning saving off with deleteExisting removes what
+    // is already saved for this name on this server.
+    Q_INVOKABLE void setHistoryChoice(int choice, bool deleteExisting);
+    // Adds the next page of saved messages above the current conversation.
+    Q_INVOKABLE void loadOlder();
 
     Q_INVOKABLE static bool isValidName(const QString& name);
     Q_INVOKABLE static int utf8Length(const QString& text);
@@ -92,6 +103,7 @@ signals:
     void onlineCountChanged();
     void sessionChanged();
     void windowActiveChanged();
+    void historyChoiceChanged();
     // An incoming message arrived (used to flash the taskbar button).
     void messageArrived(const QString& conversationId);
 
@@ -103,7 +115,9 @@ private:
     void setErrors(const QString& connectError, const QString& nameError);
     MessageModel* modelFor(const QString& id);
     void addRow(const QString& conversation, MessageModel::Kind kind, const QString& sender,
-                const QString& text);
+                const QString& text, bool persist);
+    void loadSavedHistory();
+    bool saving() const;
     void dropClient();
 
     // Handlers, always on the UI thread and only for the current connection.
@@ -135,6 +149,10 @@ private:
     QString last_target_;
     bool window_active_ = true;
     qint64 next_local_id_ = -1;
+
+    HistoryStore* history_ = nullptr;
+    QString identity_;
+    bool history_loaded_ = false;
 
     // Bumped whenever a connection is abandoned, so late callbacks from it are ignored.
     quint64 generation_ = 0;

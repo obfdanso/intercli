@@ -1,6 +1,8 @@
 // intercli desktop app entry point.
 
 #include "chat_controller.h"
+#include "history_store.h"
+#include "key_vault.h"
 #include "windows_frame.h"
 
 #include <QFont>
@@ -12,6 +14,7 @@
 #include <QQuickWindow>
 #include <QScreen>
 #include <QSettings>
+#include <QStandardPaths>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -86,7 +89,18 @@ int main(int argc, char* argv[]) {
     font.setHintingPreference(QFont::PreferNoHinting);
     QGuiApplication::setFont(font);
 
-    Intercli::ChatController chat;
+    // Saved messages live in the user's app data folder. If the store can't be
+    // opened the app still runs, without the option to save.
+    const QString data_dir = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    Intercli::HistoryStore history(data_dir + "/history.db",
+                                   Intercli::loadOrCreateHistoryKey(data_dir + "/history.key"));
+    QString history_error;
+    const bool history_ok = history.open(&history_error);
+    if (!history_ok) {
+        qWarning("Saved messages unavailable: %s", qPrintable(history_error));
+    }
+
+    Intercli::ChatController chat(history_ok ? &history : nullptr);
     qmlRegisterSingletonInstance("Intercli.Backend", 1, 0, "Chat", &chat);
     Intercli::WindowsFrame frame;
     qmlRegisterSingletonInstance("Intercli.Backend", 1, 0, "Frame", &frame);

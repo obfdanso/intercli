@@ -10,6 +10,7 @@ Rectangle {
     readonly property bool everyone: peer === ""
     readonly property bool peerOnline: Chat.onlineNames.indexOf(peer) >= 0
     property int tick: 0   // bumps every 30 s so relative times refresh
+    property bool confirmStop: false   // asking whether to delete what is saved
 
     color: Theme.panel
 
@@ -182,6 +183,97 @@ Rectangle {
                     hoverEnabled: true
                     enabled: Chat.state === Chat.Online
                     onClicked: Chat.rotateKey()
+                }
+            }
+
+            // Saved messages: the switch, and the follow-up question when it is turned off.
+            Item { width: 1; height: Chat.historyAvailable ? 10 : 0 }
+            Rectangle {
+                visible: Chat.historyAvailable
+                width: parent.width
+                height: saveRow.height + (panel.confirmStop ? confirm.height : 0)
+                radius: Theme.radiusCard
+                color: Theme.raised
+                clip: true
+
+                Item {
+                    id: saveRow
+                    width: parent.width
+                    height: 44
+                    Text {
+                        x: 12
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width - 70
+                        text: "Save messages on this computer"
+                        color: Theme.text
+                        font.pixelSize: 12
+                        wrapMode: Text.Wrap
+                    }
+                    Toggle {
+                        anchors.right: parent.right
+                        anchors.rightMargin: 12
+                        anchors.verticalCenter: parent.verticalCenter
+                        name: "Save messages on this computer"
+                        checked: Chat.historyChoice === 1
+                        onToggled: {
+                            if (checked)
+                                panel.confirmStop = true
+                            else
+                                Chat.setHistoryChoice(1, false)
+                        }
+                    }
+                }
+
+                Column {
+                    id: confirm
+                    visible: panel.confirmStop
+                    anchors.top: saveRow.bottom
+                    width: parent.width
+                    padding: 12
+                    topPadding: 0
+                    spacing: 8
+                    Text {
+                        width: parent.width - 24
+                        text: "Delete messages already saved?"
+                        color: Theme.textSecondary
+                        font.pixelSize: 12
+                        wrapMode: Text.Wrap
+                    }
+                    Column {
+                        spacing: 6
+                        Rectangle {
+                            width: confirm.width - 24
+                            height: 28
+                            radius: 7
+                            color: keepMouse.containsMouse ? Theme.raised2 : Qt.rgba(1, 1, 1, 0.06)
+                            Accessible.role: Accessible.Button
+                            Accessible.name: "Keep"
+                            Accessible.onPressAction: { Chat.setHistoryChoice(2, false); panel.confirmStop = false }
+                            Text { id: keepText; anchors.centerIn: parent; text: "Keep"; color: Theme.text; font.pixelSize: 12 }
+                            MouseArea {
+                                id: keepMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                onClicked: { Chat.setHistoryChoice(2, false); panel.confirmStop = false }
+                            }
+                        }
+                        Rectangle {
+                            width: confirm.width - 24
+                            height: 28
+                            radius: 7
+                            color: delMouse.containsMouse ? Qt.rgba(1, 69 / 255, 58 / 255, 0.25) : Qt.rgba(1, 69 / 255, 58 / 255, 0.15)
+                            Accessible.role: Accessible.Button
+                            Accessible.name: "Delete Saved Messages"
+                            Accessible.onPressAction: { Chat.setHistoryChoice(2, true); panel.confirmStop = false }
+                            Text { id: delText; anchors.centerIn: parent; text: "Delete Saved Messages"; color: Theme.danger; font.pixelSize: 12 }
+                            MouseArea {
+                                id: delMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                onClicked: { Chat.setHistoryChoice(2, true); panel.confirmStop = false }
+                            }
+                        }
+                    }
                 }
             }
 

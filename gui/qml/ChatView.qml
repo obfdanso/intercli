@@ -125,6 +125,7 @@ Item {
 
         MessageList {
             id: messages
+            onReachedTop: Chat.loadOlder()
             anchors.top: banner.bottom
             anchors.left: parent.left
             anchors.right: parent.right

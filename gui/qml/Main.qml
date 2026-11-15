@@ -36,6 +36,11 @@ ApplicationWindow {
         Behavior on opacity { NumberAnimation { duration: Theme.animNormal; easing.type: Easing.OutCubic } }
     }
 
+    SaveHistorySheet {
+        anchors.fill: parent
+        z: 50
+    }
+
     TitleBar {
         anchors.top: parent.top
         anchors.left: parent.left
