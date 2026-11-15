@@ -1,8 +1,13 @@
 #include "chat_controller.h"
 #include "text_utils.h"
+#include "host_session.h"
+#include "network_check.h"
+#include "../crypto/crypto_utils.h"
 
 #include <QDateTime>
 #include <QSettings>
+#include <QClipboard>
+#include <QGuiApplication>
 #include <QTimer>
 
 namespace Intercli {
@@ -19,9 +24,18 @@ std::string ss(const QString& s) {
 
 } // namespace
 
-ChatController::ChatController(HistoryStore* history, QObject* parent)
+ChatController::ChatController(HistoryStore* history, HostSession* host, quint16 discoveryPort, QObject* parent)
     : QObject(parent), list_(new ConversationListModel(this)), filter_(new QSortFilterProxyModel(this)),
-      history_(history) {
+      history_(history), host_session_(host), finder_(new ChatFinder(this)) {
+    // Always looking: the sign-in list needs it, and so does Reconnect when a
+    // chat's address has changed.
+    discovery_port_ = discoveryPort;
+    finder_->start(discoveryPort);
+    if (host_session_) {
+        connect(host_session_, &HostSession::started, this, &ChatController::onHostStarted);
+        connect(host_session_, &HostSession::failed, this, &ChatController::onHostFailed);
+        connect(host_session_, &HostSession::peopleChanged, this, &ChatController::peopleInChatChanged);
+    }
     filter_->setSourceModel(list_);
     filter_->setFilterRole(ConversationListModel::TitleRole);
     filter_->setFilterCaseSensitivity(Qt::CaseInsensitive);
@@ -92,10 +106,14 @@ void ChatController::setState(State s) {
     }
 }
 
-void ChatController::setErrors(const QString& connectError, const QString& nameError) {
-    if (connect_error_ != connectError || name_error_ != nameError) {
+void ChatController::setErrors(const QString& connectError, const QString& nameError, const QString& codeError,
+                               const QString& hostError) {
+    if (connect_error_ != connectError || name_error_ != nameError || code_error_ != codeError ||
+        host_error_ != hostError) {
         connect_error_ = connectError;
         name_error_ = nameError;
+        code_error_ = codeError;
+        host_error_ = hostError;
         emit errorsChanged();
     }
 }
@@ -165,18 +183,27 @@ void ChatController::startConnect(const QString& name) {
     ++generation_;
     client_ = makeClient();
 
+    // Trust on first use: a chat we have joined before must prove the same
+    // identity key, or nothing (not even the room code) is sent to it.
+    const QByteArray pinned = QByteArray::fromHex(QSettings().value("identities/" + pinKey()).toByteArray());
+    identity_was_known_ = pinned.size() == 32;
+    if (identity_was_known_) {
+        client_->set_expected_identity(std::vector<uint8_t>(pinned.begin(), pinned.end()));
+    }
+
     const quint64 gen = generation_;
     auto client = client_;
     const std::string host = ss(host_);
     const auto port = static_cast<uint16_t>(port_);
     const std::string wanted = ss(name);
+    const std::string code = ss(room_code_);
     auto done = std::make_shared<std::atomic<bool>>(false);
     worker_done_ = done;
-    worker_ = std::thread([this, gen, client, host, port, wanted, done] {
+    worker_ = std::thread([this, gen, client, host, port, wanted, code, done] {
         std::string error;
         const bool ok = client->connect(host, port, &error);
         if (ok) {
-            client->request_name(wanted);
+            client->request_name(wanted, code);
         }
         *done = true;
         QMetaObject::invokeMethod(this, [this, gen, ok, error] {
@@ -187,7 +214,37 @@ void ChatController::startConnect(const QString& name) {
     });
 }
 
-void ChatController::signIn(const QString& host, int port, const QString& name) {
+// Shared by every way of signing in; host_, port_, chat_id_ and room_code_
+// are set by the caller.
+bool ChatController::beginSignIn(const QString& name) {
+    if (state_ != SignedOut) {
+        return false;
+    }
+    if (!Intercli::isValidName(name)) {
+        setErrors(QString(), QStringLiteral("Names are 1-31 characters with no spaces"));
+        return false;
+    }
+    my_name_ = name;
+    emit serverChanged();
+    emit myNameChanged();
+
+    QSettings settings;
+    settings.setValue("lastName", my_name_);
+
+    setErrors(QString(), QString());
+    needs_sign_in_ = false;
+    register_retries_ = 0;
+    // Saved history follows the chat, not its address, when we know the chat.
+    identity_ = chat_id_.isEmpty() ? identityKey(host_, port_, my_name_)
+                                   : QStringLiteral("chat:%1/%2").arg(chat_id_, my_name_);
+    history_loaded_ = false;
+    emit historyChoiceChanged();
+    setState(Connecting);
+    startConnect(name);
+    return true;
+}
+
+void ChatController::signIn(const QString& host, int port, const QString& name, const QString& roomCode) {
     if (state_ != SignedOut) {
         return;
     }
@@ -199,26 +256,142 @@ void ChatController::signIn(const QString& host, int port, const QString& name) 
         setErrors(QStringLiteral("Enter a server address and a port from 1 to 65535"), QString());
         return;
     }
-
     host_ = host.trimmed();
     port_ = port;
-    my_name_ = name;
-    emit serverChanged();
-    emit myNameChanged();
-
+    chat_id_.clear();
+    room_code_ = QString::fromStdString(SecureComm::normalize_room_code(ss(roomCode)));
     QSettings settings;
     settings.setValue("lastHost", host_);
     settings.setValue("lastPort", port_);
-    settings.setValue("lastName", my_name_);
+    beginSignIn(name);
+}
 
+void ChatController::joinChat(const QString& chatId, const QString& roomCode, const QString& name) {
+    if (state_ != SignedOut) {
+        return;
+    }
+    const QString code = QString::fromStdString(SecureComm::normalize_room_code(ss(roomCode)));
+    if (code.isEmpty()) {
+        setErrors(QString(), QString(), QStringLiteral("Enter the room code"));
+        return;
+    }
+    const auto chat = finder_->find(chatId);
+    if (!chat) {
+        setErrors(QStringLiteral("That chat is no longer on this network"), QString());
+        return;
+    }
+    host_ = chat->address.toString();
+    port_ = chat->port;
+    chat_id_ = chatId;
+    room_code_ = code;
+    beginSignIn(name);
+}
+
+void ChatController::hostChat(const QString& name) {
+    if (state_ != SignedOut || hosting_) {
+        return;
+    }
+    if (!host_session_) {
+        setErrors(QString(), QString(), QString(), QStringLiteral("Hosting isn't available"));
+        return;
+    }
+    if (!Intercli::isValidName(name)) {
+        setErrors(QString(), QStringLiteral("Names are 1-31 characters with no spaces"));
+        return;
+    }
+    refreshNetworkCheck();
+    my_name_ = name;
     setErrors(QString(), QString());
-    needs_sign_in_ = false;
-    register_retries_ = 0;
-    identity_ = identityKey(host_, port_, my_name_);
-    history_loaded_ = false;
-    emit historyChoiceChanged();
-    setState(Connecting);
-    startConnect(name);
+    hosting_ = true;
+    emit hostingChanged();
+    host_session_->start(name, discovery_port_);
+}
+
+void ChatController::onHostStarted(quint16 port) {
+    if (!hosting_ || state_ != SignedOut) {
+        return;
+    }
+    QSettings().setValue("host/firewallNoteShown", true);
+    // Join our own chat like anyone else, over this PC's loopback.
+    host_ = QStringLiteral("127.0.0.1");
+    port_ = port;
+    chat_id_ = host_session_->chatId();
+    room_code_ = host_session_->roomCode();
+    // We know our own identity, so it is pinned from the start.
+    QSettings().setValue("identities/chat:" + chat_id_, host_session_->identityPublic().toHex());
+    emit hostingChanged();
+    if (!beginSignIn(my_name_)) {
+        host_session_->stop();
+        hosting_ = false;
+        emit hostingChanged();
+    }
+}
+
+void ChatController::onHostFailed(const QString& reason) {
+    hosting_ = false;
+    emit hostingChanged();
+    setErrors(QString(), QString(), QString(), reason);
+}
+
+void ChatController::endChat() {
+    if (hosting_ && host_session_) {
+        // Sign out first so our own connection closes cleanly, then stop.
+        hosting_ = false;
+        signOut();
+        host_session_->stop();
+        emit hostingChanged();
+        emit peopleInChatChanged();
+        return;
+    }
+    signOut();
+}
+
+bool ChatController::needsEndChatConfirm() const {
+    return hosting_ && peopleInChat() > 1;
+}
+
+QString ChatController::roomCode() const {
+    return hosting_ && host_session_ ? QString::fromStdString(SecureComm::format_room_code(ss(host_session_->roomCode())))
+                                     : QString();
+}
+
+int ChatController::peopleInChat() const {
+    return hosting_ && host_session_ ? host_session_->people() : 0;
+}
+
+QString ChatController::safetyCode() const {
+    if (server_identity_.size() != 32) {
+        return QString();
+    }
+    const std::vector<uint8_t> raw(server_identity_.begin(), server_identity_.end());
+    return QString::fromStdString(SecureComm::safety_code(raw));
+}
+
+bool ChatController::firewallNoteNeeded() const {
+    return !QSettings().value("host/firewallNoteShown", false).toBool();
+}
+
+QString ChatController::rememberedCode(const QString& chatId) const {
+    const QString code = QSettings().value("codes/" + chatId).toString();
+    return code.isEmpty() ? QString() : QString::fromStdString(SecureComm::format_room_code(ss(code)));
+}
+
+void ChatController::copyRoomCode() const {
+    if (QClipboard* clipboard = QGuiApplication::clipboard()) {
+        clipboard->setText(roomCode());
+    }
+}
+
+void ChatController::refreshNetworkCheck() {
+    const bool isPublic = onPublicNetwork();
+    if (isPublic != public_network_) {
+        public_network_ = isPublic;
+        emit publicNetworkChanged();
+    }
+}
+
+QString ChatController::pinKey() const {
+    return chat_id_.isEmpty() ? QStringLiteral("addr:%1:%2").arg(host_).arg(port_) : QStringLiteral("chat:") + chat_id_;
 }
 
 void ChatController::onConnectResult(bool ok, const QString& error) {
@@ -230,6 +403,11 @@ void ChatController::onConnectResult(bool ok, const QString& error) {
     const QString reason = error.isEmpty() ? QStringLiteral("Couldn't reach %1:%2").arg(host_).arg(port_) : error;
     abandonConnection();
     if (state_ == Connecting) {
+        if (hosting_ && host_session_) {
+            host_session_->stop();
+            hosting_ = false;
+            emit hostingChanged();
+        }
         setErrors(reason, QString());
         setState(SignedOut);
     } else if (state_ == Reconnecting) {
@@ -243,6 +421,17 @@ void ChatController::onRegistered(const QString& name) {
     my_name_ = name;
     emit myNameChanged();
     disconnect_reason_.clear();
+    if (client_) {
+        const std::vector<uint8_t> id = client_->server_identity();
+        server_identity_ = QByteArray(reinterpret_cast<const char*>(id.data()), static_cast<qsizetype>(id.size()));
+        QSettings settings;
+        if (!identity_was_known_) {
+            settings.setValue("identities/" + pinKey(), server_identity_.toHex());
+        }
+        if (!chat_id_.isEmpty() && !room_code_.isEmpty()) {
+            settings.setValue("codes/" + chat_id_, room_code_);
+        }
+    }
     if (!history_loaded_) {
         history_loaded_ = true;
         loadSavedHistory();
@@ -258,7 +447,17 @@ void ChatController::onRegisterFailed(const QString& reason) {
     if (state_ == Connecting) {
         ++generation_;
         abandonConnection();
-        setErrors(QString(), reason);
+        const bool codeProblem = reason == QStringLiteral("Wrong room code") || reason.startsWith(QStringLiteral("Too many wrong"));
+        if (hosting_ && host_session_) {
+            host_session_->stop();
+            hosting_ = false;
+            emit hostingChanged();
+        }
+        if (codeProblem) {
+            setErrors(QString(), QString(), reason);
+        } else {
+            setErrors(QString(), reason);
+        }
         setState(SignedOut);
         return;
     }
@@ -269,7 +468,7 @@ void ChatController::onRegisterFailed(const QString& reason) {
             const quint64 gen = generation_;
             QTimer::singleShot(1000, this, [this, gen] {
                 if (gen == generation_ && state_ == Reconnecting && client_) {
-                    client_->request_name(ss(my_name_));
+                    client_->request_name(ss(my_name_), ss(room_code_));
                 }
             });
             return;
@@ -504,6 +703,13 @@ void ChatController::reconnect() {
         return;
     }
     register_retries_ = 0;
+    // A chat from the list may have a new address or port by now.
+    if (!chat_id_.isEmpty() && !hosting_) {
+        if (const auto chat = finder_->find(chat_id_)) {
+            host_ = chat->address.toString();
+            port_ = chat->port;
+        }
+    }
     setState(Reconnecting);
     startConnect(my_name_);
 }
@@ -511,6 +717,13 @@ void ChatController::reconnect() {
 void ChatController::signOut() {
     ++generation_;
     abandonConnection();
+    if (hosting_ && host_session_) {
+        host_session_->stop();
+        hosting_ = false;
+        emit hostingChanged();
+        emit peopleInChatChanged();
+    }
+    server_identity_.clear();
     list_->clear();
     for (MessageModel* m : models_) {
         m->clear();
@@ -543,7 +756,9 @@ QVariantMap ChatController::session() const {
     QVariantMap m;
     m["cipher"] = qs(st.cipher);
     m["keyExchange"] = qs(st.key_exchange);
-    m["serverIdentity"] = QStringLiteral("Not verified");
+    m["serverIdentity"] = server_identity_.isEmpty() ? QStringLiteral("Not verified")
+                        : identity_was_known_      ? QStringLiteral("Verified")
+                                                   : QStringLiteral("First join");
     m["sendRotations"] = static_cast<int>(st.send_rotations);
     m["receiveRotations"] = static_cast<int>(st.receive_rotations);
     m["messagesUntilRotation"] = static_cast<int>(st.messages_until_rotation);

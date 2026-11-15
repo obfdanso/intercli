@@ -2,6 +2,7 @@
 
 #include "chat_client.h"
 #include "conversation_list_model.h"
+#include "discovery.h"
 #include "history_store.h"
 #include "message_model.h"
 
@@ -43,13 +44,27 @@ class ChatController : public QObject {
     Q_PROPERTY(bool windowActive READ windowActive WRITE setWindowActive NOTIFY windowActiveChanged)
     Q_PROPERTY(bool historyAvailable READ historyAvailable CONSTANT)
     Q_PROPERTY(int historyChoice READ historyChoice NOTIFY historyChoiceChanged)
+    // Same-room chats.
+    Q_PROPERTY(Intercli::ChatFinder* nearby READ nearby CONSTANT)
+    Q_PROPERTY(bool hostingAvailable READ hostingAvailable CONSTANT)
+    Q_PROPERTY(bool hosting READ hosting NOTIFY hostingChanged)
+    Q_PROPERTY(QString roomCode READ roomCode NOTIFY hostingChanged)
+    Q_PROPERTY(int peopleInChat READ peopleInChat NOTIFY peopleInChatChanged)
+    Q_PROPERTY(QString safetyCode READ safetyCode NOTIFY sessionChanged)
+    Q_PROPERTY(QString codeError READ codeError NOTIFY errorsChanged)
+    Q_PROPERTY(QString hostError READ hostError NOTIFY errorsChanged)
+    Q_PROPERTY(bool publicNetwork READ publicNetwork NOTIFY publicNetworkChanged)
+    Q_PROPERTY(bool firewallNoteNeeded READ firewallNoteNeeded NOTIFY hostingChanged)
 
 public:
     enum State { SignedOut, Connecting, Online, Disconnected, Reconnecting };
     Q_ENUM(State)
 
     // history may be null (saving is then unavailable); it must outlive the controller.
-    explicit ChatController(HistoryStore* history = nullptr, QObject* parent = nullptr);
+    // host may be null (hosting is then unavailable); like history, it must
+    // outlive the controller. discoveryPort is where chats nearby answer.
+    explicit ChatController(HistoryStore* history = nullptr, class HostSession* host = nullptr,
+                            quint16 discoveryPort = kDiscoveryPort, QObject* parent = nullptr);
     ~ChatController() override;
 
     State state() const { return state_; }
@@ -72,7 +87,32 @@ public:
     int historyChoice() const;
     void setWindowActive(bool active);
 
-    Q_INVOKABLE void signIn(const QString& host, int port, const QString& name);
+    ChatFinder* nearby() const { return finder_; }
+    bool hostingAvailable() const { return host_session_ != nullptr; }
+    bool hosting() const { return hosting_; }
+    QString roomCode() const;
+    int peopleInChat() const;
+    QString safetyCode() const;
+    QString codeError() const { return code_error_; }
+    QString hostError() const { return host_error_; }
+    bool publicNetwork() const { return public_network_; }
+    bool firewallNoteNeeded() const;
+    QString historyIdentityForTests() const { return identity_; }
+
+    // By address; room_code only for a chat that has one.
+    Q_INVOKABLE void signIn(const QString& host, int port, const QString& name, const QString& roomCode = QString());
+    // Joins a chat from the "Chats nearby" list.
+    Q_INVOKABLE void joinChat(const QString& chatId, const QString& roomCode, const QString& name);
+    // Starts a chat on this PC and joins it.
+    Q_INVOKABLE void hostChat(const QString& name);
+    // The host ends the chat for everyone and signs out.
+    Q_INVOKABLE void endChat();
+    // True when signing out or closing would disconnect other people.
+    Q_INVOKABLE bool needsEndChatConfirm() const;
+    // The code that worked last time for this chat, formatted, or empty.
+    Q_INVOKABLE QString rememberedCode(const QString& chatId) const;
+    Q_INVOKABLE void copyRoomCode() const;
+    Q_INVOKABLE void refreshNetworkCheck();
     // Sends to the current conversation. False when blank, too long or offline.
     Q_INVOKABLE bool send(const QString& text);
     Q_INVOKABLE void rotateKey();
@@ -108,17 +148,25 @@ signals:
     void sessionChanged();
     void windowActiveChanged();
     void historyChoiceChanged();
+    void hostingChanged();
+    void peopleInChatChanged();
+    void publicNetworkChanged();
     // An incoming message arrived (used to flash the taskbar button).
     void messageArrived(const QString& conversationId);
 
 private:
     std::shared_ptr<SecureComm::ChatClient> makeClient();
     void startConnect(const QString& name);
+    bool beginSignIn(const QString& name);
+    QString pinKey() const;
+    void onHostStarted(quint16 port);
+    void onHostFailed(const QString& reason);
     void finishWorker();
     void abandonConnection();
     void reapRetired();
     void setState(State s);
-    void setErrors(const QString& connectError, const QString& nameError);
+    void setErrors(const QString& connectError, const QString& nameError, const QString& codeError = QString(),
+                   const QString& hostError = QString());
     MessageModel* modelFor(const QString& id);
     void addRow(const QString& conversation, MessageModel::Kind kind, const QString& sender,
                 const QString& text, bool persist);
@@ -156,6 +204,18 @@ private:
     qint64 next_local_id_ = -1;
 
     HistoryStore* history_ = nullptr;
+
+    class HostSession* host_session_ = nullptr;
+    ChatFinder* finder_ = nullptr;
+    bool hosting_ = false;
+    quint16 discovery_port_ = kDiscoveryPort;
+    bool public_network_ = false;
+    QString chat_id_;      // set for chats joined from the list or hosted here
+    QString room_code_;    // normalised code used for this chat
+    QString code_error_;
+    QString host_error_;
+    QByteArray server_identity_;
+    bool identity_was_known_ = false;
     QString identity_;
     bool history_loaded_ = false;
 

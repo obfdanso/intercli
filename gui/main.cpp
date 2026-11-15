@@ -2,6 +2,7 @@
 
 #include "chat_controller.h"
 #include "history_store.h"
+#include "host_session.h"
 #include "key_vault.h"
 #include "windows_frame.h"
 
@@ -49,7 +50,9 @@ int main(int argc, char* argv[]) {
         qWarning("Saved messages unavailable: %s", qPrintable(history_error));
     }
 
-    Intercli::ChatController chat(history_ok ? &history : nullptr);
+    // Hosting a chat from this PC (the chat id, room code and identity key live here too).
+    Intercli::HostSession host(data_dir);
+    Intercli::ChatController chat(history_ok ? &history : nullptr, &host);
     qmlRegisterSingletonInstance("Intercli.Backend", 1, 0, "Chat", &chat);
     Intercli::WindowsFrame frame;
     qmlRegisterSingletonInstance("Intercli.Backend", 1, 0, "Frame", &frame);

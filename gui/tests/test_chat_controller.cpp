@@ -6,6 +6,8 @@
 #include "conversation_list_model.h"
 #include "message_model.h"
 #include "history_store.h"
+#include "host_session.h"
+#include "discovery.h"
 #include "../../tests/silent_server.h"
 
 #include <QElapsedTimer>
@@ -243,7 +245,7 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(bob->session().value("sendRotations").toInt(), before + 1, kWait);
         QCOMPARE(bob->session().value("messagesUntilRotation").toInt(), 10);
         QVERIFY(bob->session().value("lastSendRotation").toDateTime().isValid());
-        QCOMPARE(bob->session().value("serverIdentity").toString(), QStringLiteral("Not verified"));
+        QVERIFY(bob->session().value("serverIdentity").toString() != QStringLiteral("Not verified"));
         bob->rotateKey();
         QTRY_COMPARE_WITH_TIMEOUT(bob->session().value("sendRotations").toInt(), before + 2, kWait);
         QTRY_COMPARE_WITH_TIMEOUT(lastText(bob->messages()), QStringLiteral("Your send key rotated"), kWait);
@@ -330,6 +332,66 @@ private slots:
         c.setHistoryChoice(int(HistoryChoice::DontSave), true);
         QCOMPARE(store.loadPage(identity("hdel"), "alice", 50).size(), 0);
         QCOMPARE(store.totalMessageRowsForTest(), 0);
+    }
+
+    // --- hosting and joining nearby chats ---------------------------------
+
+    void host_join_code_pin_and_end() {
+        constexpr quint16 discovery = 18084;
+        QTemporaryDir hostData;
+        HostSession hosting(hostData.path());
+        ChatController host(nullptr, &hosting, discovery);
+        host.hostChat("hana");
+        QTRY_COMPARE_WITH_TIMEOUT(host.state(), ChatController::Online, kWait);
+        QVERIFY(host.hosting());
+        QCOMPARE(host.roomCode().size(), 7);  // XXX-XXX
+        QVERIFY(!host.safetyCode().isEmpty());
+        QCOMPARE(host.safetyCode(), hosting.safetyCode());
+        QVERIFY(host.historyIdentityForTests().startsWith("chat:" + hosting.chatId() + "/"));
+        const QString chatId = hosting.chatId();
+        const QString code = host.roomCode();
+
+        // Someone else finds it in the list and joins with the code.
+        ChatController joiner(nullptr, nullptr, discovery);
+        QTRY_VERIFY_WITH_TIMEOUT(joiner.nearby()->find(chatId).has_value(), 6000);
+        joiner.joinChat(chatId, code.toLower(), "jojo");
+        QTRY_COMPARE_WITH_TIMEOUT(joiner.state(), ChatController::Online, kWait);
+        QCOMPARE(joiner.safetyCode(), host.safetyCode());
+        QVERIFY(joiner.historyIdentityForTests().startsWith("chat:" + chatId + "/"));
+        QCOMPARE(joiner.rememberedCode(chatId), code);
+        QTRY_COMPARE_WITH_TIMEOUT(host.peopleInChat(), 2, 6000);
+        QVERIFY(host.needsEndChatConfirm());
+
+        // A wrong code says so, next to the code field.
+        ChatController guesser(nullptr, nullptr, discovery);
+        QTRY_VERIFY_WITH_TIMEOUT(guesser.nearby()->find(chatId).has_value(), 6000);
+        guesser.joinChat(chatId, "AAAAAA", "guess");
+        QTRY_COMPARE_WITH_TIMEOUT(guesser.state(), ChatController::SignedOut, kWait);
+        QCOMPARE(guesser.codeError(), QStringLiteral("Wrong room code"));
+        QVERIFY(guesser.nameError().isEmpty());
+
+        // A known chat whose identity changed is refused before anything is sent.
+        QSettings().setValue("identities/chat:" + chatId, QString(64, QLatin1Char('a')));
+        ChatController wary(nullptr, nullptr, discovery);
+        QTRY_VERIFY_WITH_TIMEOUT(wary.nearby()->find(chatId).has_value(), 6000);
+        wary.joinChat(chatId, code, "wary");
+        QTRY_COMPARE_WITH_TIMEOUT(wary.state(), ChatController::SignedOut, kWait);
+        QVERIFY2(wary.connectError().contains("identity has changed"), qPrintable(wary.connectError()));
+        QTest::qWait(500);
+        QCOMPARE(host.peopleInChat(), 2);
+        QSettings().remove("identities/chat:" + chatId);
+
+        // The joiner drops and comes back: found again by chat id.
+        joiner.simulateConnectionLoss();
+        QTRY_COMPARE_WITH_TIMEOUT(joiner.state(), ChatController::Disconnected, kWait);
+        joiner.reconnect();
+        QTRY_COMPARE_WITH_TIMEOUT(joiner.state(), ChatController::Online, kWait);
+
+        // The host ends the chat: the joiner is disconnected.
+        host.endChat();
+        QCOMPARE(host.state(), ChatController::SignedOut);
+        QVERIFY(!host.hosting());
+        QTRY_COMPARE_WITH_TIMEOUT(joiner.state(), ChatController::Disconnected, kWait);
     }
 
     void connection_loss_reconnects() {
