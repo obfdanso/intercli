@@ -35,21 +35,54 @@ ChatController::ChatController(HistoryStore* history, QObject* parent)
 
 ChatController::~ChatController() {
     ++generation_;
-    finishWorker();
-    dropClient();
+    abandonConnection();
+    // Only here, at exit, do we wait for cancelled connects to wind down.
+    for (Retired& r : retired_) {
+        if (r.thread.joinable()) {
+            r.thread.join();
+        }
+    }
 }
 
+// Only called once the worker has reported back, so the join is instant.
 void ChatController::finishWorker() {
     if (worker_.joinable()) {
         worker_.join();
     }
 }
 
-void ChatController::dropClient() {
+void ChatController::reapRetired() {
+    for (auto it = retired_.begin(); it != retired_.end();) {
+        if (it->done && *it->done) {
+            it->thread.join();
+            it = retired_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+// Lets go of the current connection without ever blocking the UI thread on a
+// connect in flight: that client is cancelled and its worker set aside.
+void ChatController::abandonConnection() {
+    const bool connecting = worker_.joinable() && !(worker_done_ && *worker_done_);
     if (client_) {
-        client_->disconnect();
+        if (connecting) {
+            client_->cancel();
+        } else {
+            client_->disconnect();
+        }
         client_.reset();
     }
+    if (worker_.joinable()) {
+        if (connecting) {
+            retired_.push_back(Retired{std::move(worker_), worker_done_});
+        } else {
+            worker_.join();
+        }
+    }
+    worker_done_.reset();
+    reapRetired();
 }
 
 void ChatController::setState(State s) {
@@ -128,8 +161,7 @@ std::shared_ptr<SecureComm::ChatClient> ChatController::makeClient() {
 // Connects and asks for the name on a worker thread: RSA key generation, DNS and
 // the handshake all block.
 void ChatController::startConnect(const QString& name) {
-    finishWorker();
-    dropClient();
+    abandonConnection();
     ++generation_;
     client_ = makeClient();
 
@@ -138,12 +170,15 @@ void ChatController::startConnect(const QString& name) {
     const std::string host = ss(host_);
     const auto port = static_cast<uint16_t>(port_);
     const std::string wanted = ss(name);
-    worker_ = std::thread([this, gen, client, host, port, wanted] {
+    auto done = std::make_shared<std::atomic<bool>>(false);
+    worker_done_ = done;
+    worker_ = std::thread([this, gen, client, host, port, wanted, done] {
         std::string error;
         const bool ok = client->connect(host, port, &error);
         if (ok) {
             client->request_name(wanted);
         }
+        *done = true;
         QMetaObject::invokeMethod(this, [this, gen, ok, error] {
             if (gen == generation_) {
                 onConnectResult(ok, qs(error));
@@ -193,7 +228,7 @@ void ChatController::onConnectResult(bool ok, const QString& error) {
         return;  // the name answer arrives through onRegistered / onRegisterFailed
     }
     const QString reason = QStringLiteral("Couldn't reach %1:%2").arg(host_).arg(port_);
-    dropClient();
+    abandonConnection();
     if (state_ == Connecting) {
         setErrors(reason, QString());
         setState(SignedOut);
@@ -222,7 +257,7 @@ void ChatController::onRegistered(const QString& name) {
 void ChatController::onRegisterFailed(const QString& reason) {
     if (state_ == Connecting) {
         ++generation_;
-        dropClient();
+        abandonConnection();
         setErrors(QString(), reason);
         setState(SignedOut);
         return;
@@ -240,7 +275,7 @@ void ChatController::onRegisterFailed(const QString& reason) {
             return;
         }
         ++generation_;
-        dropClient();
+        abandonConnection();
         disconnect_reason_ = reason;
         needs_sign_in_ = true;
         setState(Disconnected);
@@ -426,14 +461,12 @@ void ChatController::onDisconnected(const QString& reason) {
         emit onlineCountChanged();
     } else if (state_ == Connecting) {
         ++generation_;
-        finishWorker();
-        dropClient();
+        abandonConnection();
         setErrors(reason, QString());
         setState(SignedOut);
     } else if (state_ == Reconnecting) {
         ++generation_;
-        finishWorker();
-        dropClient();
+        abandonConnection();
         disconnect_reason_ = reason;
         setState(Disconnected);
         emit stateChanged();
@@ -473,8 +506,7 @@ void ChatController::reconnect() {
 
 void ChatController::signOut() {
     ++generation_;
-    finishWorker();
-    dropClient();
+    abandonConnection();
     list_->clear();
     for (MessageModel* m : models_) {
         m->clear();

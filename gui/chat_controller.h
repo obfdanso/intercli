@@ -13,7 +13,9 @@
 #include <QStringList>
 #include <QVariantMap>
 
+#include <atomic>
 #include <memory>
+#include <vector>
 #include <thread>
 
 namespace Intercli {
@@ -111,6 +113,8 @@ private:
     std::shared_ptr<SecureComm::ChatClient> makeClient();
     void startConnect(const QString& name);
     void finishWorker();
+    void abandonConnection();
+    void reapRetired();
     void setState(State s);
     void setErrors(const QString& connectError, const QString& nameError);
     MessageModel* modelFor(const QString& id);
@@ -118,7 +122,6 @@ private:
                 const QString& text, bool persist);
     void loadSavedHistory();
     bool saving() const;
-    void dropClient();
 
     // Handlers, always on the UI thread and only for the current connection.
     void onConnectResult(bool ok, const QString& error);
@@ -158,6 +161,15 @@ private:
     quint64 generation_ = 0;
     std::shared_ptr<SecureComm::ChatClient> client_;
     std::thread worker_;
+    // Set by the worker just before it reports back, so we know joining is instant.
+    std::shared_ptr<std::atomic<bool>> worker_done_;
+    // Workers whose connect was cancelled but may still be finishing (RSA key
+    // generation can't be interrupted). Joined once done, or at destruction.
+    struct Retired {
+        std::thread thread;
+        std::shared_ptr<std::atomic<bool>> done;
+    };
+    std::vector<Retired> retired_;
 };
 
 } // namespace Intercli

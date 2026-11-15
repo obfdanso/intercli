@@ -6,6 +6,7 @@
 #include "conversation_list_model.h"
 #include "message_model.h"
 #include "history_store.h"
+#include "../../tests/silent_server.h"
 
 #include <QElapsedTimer>
 #include <QSettings>
@@ -138,6 +139,35 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(other.state(), ChatController::SignedOut, 30000);
         QVERIFY(!other.connectError().isEmpty());
         QVERIFY(other.nameError().isEmpty());
+    }
+
+    // A server that accepts but never answers: leaving must not freeze the UI.
+    void sign_out_during_connect_returns_quickly() {
+        SilentServer silent;
+        ChatController other;
+        other.signIn("127.0.0.1", silent.port(), "slowpoke");
+        QTest::qWait(200);
+        QCOMPARE(other.state(), ChatController::Connecting);
+        QElapsedTimer timer;
+        timer.start();
+        other.signOut();
+        QVERIFY2(timer.elapsed() < 200, qPrintable(QString("signOut took %1 ms").arg(timer.elapsed())));
+        QCOMPARE(other.state(), ChatController::SignedOut);
+        // A fresh sign-in after that works normally.
+        other.signIn("127.0.0.1", SecureComm::DEFAULT_PORT, "slowpoke");
+        QTRY_COMPARE_WITH_TIMEOUT(other.state(), ChatController::Online, kWait);
+    }
+
+    void closing_during_connect_does_not_hang() {
+        SilentServer silent;
+        auto other = std::make_unique<ChatController>();
+        other->signIn("127.0.0.1", silent.port(), "slowpoke2");
+        QTest::qWait(200);
+        QElapsedTimer timer;
+        timer.start();
+        other.reset();
+        // Bounded by RSA key generation at most, never by the silent server.
+        QVERIFY2(timer.elapsed() < 5000, qPrintable(QString("destruction took %1 ms").arg(timer.elapsed())));
     }
 
     void direct_and_broadcast_rows() {
