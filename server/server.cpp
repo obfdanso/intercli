@@ -2,6 +2,12 @@
 // server/core so the desktop app can host a chat with the same code.
 
 #include "secure_server.h"
+#include "../crypto/crypto_utils.h"
+
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <vector>
 
 #include <atomic>
 #include <chrono>
@@ -17,6 +23,32 @@ std::atomic<bool> g_running(true);
 // Only sets a flag: iostreams are not safe to use inside a signal handler.
 void signal_handler(int) {
     g_running = false;
+}
+
+// The server's long-term identity lives in intercli-server.key next to where
+// it runs, so clients that joined before recognise it after a restart. Created
+// on first run, readable by the owner only.
+std::vector<uint8_t> load_or_create_identity() {
+    const std::filesystem::path path = "intercli-server.key";
+    std::ifstream in(path, std::ios::binary);
+    if (in) {
+        std::vector<uint8_t> key((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        if (key.size() == 32) {
+            return key;
+        }
+        std::cerr << "Ignoring a damaged intercli-server.key; using a temporary identity" << std::endl;
+        return {};
+    }
+    SecureComm::CryptoManager crypto;
+    std::vector<uint8_t> key = crypto.generate_identity().private_raw;
+    {
+        std::ofstream out(path, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(key.data()), static_cast<std::streamsize>(key.size()));
+    }
+    std::error_code ec;
+    std::filesystem::permissions(path, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+                                 std::filesystem::perm_options::replace, ec);
+    return key;
 }
 
 } // namespace
@@ -35,6 +67,7 @@ int main() {
 
     try {
         SecureComm::ServerOptions options;
+        options.identity_private = load_or_create_identity();
         options.log = [](const std::string& line, bool is_error) {
             (is_error ? std::cerr : std::cout) << line << std::endl;
         };
