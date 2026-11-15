@@ -12,4 +12,8 @@ namespace Intercli {
 // (an existing file that won't unwrap is left untouched); saving is then off.
 QByteArray loadOrCreateHistoryKey(const QString& keyFilePath);
 
+// The same for any secret of `size` random bytes (for example the hosting
+// app's identity key).
+QByteArray loadOrCreateSecret(const QString& keyFilePath, int size);
+
 } // namespace Intercli

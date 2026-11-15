@@ -13,16 +13,19 @@ qt_add_library(intercli_gui_lib STATIC
     key_vault.cpp
     history_store.cpp
     discovery.cpp
+    host_session.cpp
+    network_check.cpp
 )
 target_include_directories(intercli_gui_lib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(intercli_gui_lib PUBLIC
     intercli_client_core
+    intercli_server_core
     Qt6::Quick
     Qt6::Sql
     Qt6::Network
 )
 if(WIN32)
-    target_link_libraries(intercli_gui_lib PUBLIC dwmapi user32 crypt32)
+    target_link_libraries(intercli_gui_lib PUBLIC dwmapi user32 crypt32 ole32)
 endif()
 
 qt_add_executable(intercli_gui WIN32
@@ -111,6 +114,9 @@ intercli_add_qt_test(test_chat_controller WITH_SERVER)
 intercli_add_qt_test(test_history_store)
 intercli_add_qt_test(test_windows_frame)
 intercli_add_qt_test(test_discovery)
+intercli_add_qt_test(test_host_session)
+# Takes port 8080 itself, like the tests that run against a real server.
+set_tests_properties(test_host_session PROPERTIES RESOURCE_LOCK port8080)
 
 if(WIN32)
     # Copy Qt's DLLs and QML modules next to intercli.exe so it runs without Qt on PATH.
