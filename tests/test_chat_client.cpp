@@ -127,6 +127,9 @@ int main() {
     check(alice.connect("127.0.0.1", DEFAULT_PORT, &error), "alice connects");
     check(bob.connect("localhost", DEFAULT_PORT, &error), "bob connects by host name");
     check(alice.connected() && bob.connected(), "both report connected");
+    // Without keepalive a silently dropped network (Wi-Fi off) would leave the
+    // client showing online forever.
+    check(alice.keepalive_enabled(), "keepalive is on for the connection");
 
     std::cout << "Registration" << std::endl;
     alice.request_name("alice");

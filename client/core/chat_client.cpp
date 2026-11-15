@@ -6,6 +6,7 @@
 #ifdef _WIN32
     #include <winsock2.h>
     #include <ws2tcpip.h>
+    #include <mstcpip.h>
 #else
     #include <sys/socket.h>
     #include <netinet/in.h>
@@ -15,6 +16,7 @@
     #include <fcntl.h>
     #include <cerrno>
     #include <sys/select.h>
+    #include <netinet/tcp.h>
 #endif
 
 namespace SecureComm {
@@ -44,6 +46,24 @@ void shutdown_raw(intptr_t s) {
 }
 
 constexpr int kConnectTimeoutMs = 10000;
+
+// Probe an idle connection after 30 s, then every 5 s, so a network that
+// silently disappears (Wi-Fi off, cable out) is noticed in about a minute.
+void enable_keepalive(intptr_t raw) {
+    const auto s = static_cast<socket_t>(raw);
+    int on = 1;
+    setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, reinterpret_cast<const char*>(&on), sizeof(on));
+#ifdef _WIN32
+    tcp_keepalive vals = {1, 30000, 5000};
+    DWORD returned = 0;
+    WSAIoctl(s, SIO_KEEPALIVE_VALS, &vals, sizeof(vals), nullptr, 0, &returned, nullptr, nullptr);
+#elif defined(TCP_KEEPIDLE)
+    int idle = 30, interval = 5, count = 6;
+    setsockopt(s, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle));
+    setsockopt(s, IPPROTO_TCP, TCP_KEEPINTVL, &interval, sizeof(interval));
+    setsockopt(s, IPPROTO_TCP, TCP_KEEPCNT, &count, sizeof(count));
+#endif
+}
 constexpr int kHandshakeTimeoutMs = 10000;
 
 MessageHeader make_header(MessageType type, uint32_t sequence, uint16_t payload_size) {
@@ -243,6 +263,7 @@ bool ChatClient::connect_socket(const std::string& host, uint16_t port, std::str
 #else
             fcntl(s, F_SETFL, fcntl(s, F_GETFL, 0) & ~O_NONBLOCK);
 #endif
+            enable_keepalive(static_cast<intptr_t>(s));
         } else {
             close_socket();
         }
@@ -323,6 +344,17 @@ void ChatClient::drop_connection_for_test() {
     if (s >= 0) {
         shutdown_raw(s);
     }
+}
+
+bool ChatClient::keepalive_enabled() const {
+    const intptr_t s = socket_.load();
+    if (s < 0) {
+        return false;
+    }
+    int on = 0;
+    socklen_t len = sizeof(on);
+    getsockopt(static_cast<socket_t>(s), SOL_SOCKET, SO_KEEPALIVE, reinterpret_cast<char*>(&on), &len);
+    return on != 0;
 }
 
 bool ChatClient::connected() const {

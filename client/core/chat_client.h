@@ -79,6 +79,8 @@ public:
     bool rotate_send_key();
 
     bool connected() const;
+    // Whether TCP keepalive probes are on for the current connection.
+    bool keepalive_enabled() const;
     SessionStatus status() const;
 
     // Test only: drops the connection as if the network failed, so
