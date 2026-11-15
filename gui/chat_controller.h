@@ -76,6 +76,9 @@ public:
 
     Q_INVOKABLE static bool isValidName(const QString& name);
     Q_INVOKABLE static int utf8Length(const QString& text);
+    // [top, bottom] gradient colours for a person's avatar.
+    Q_INVOKABLE static QVariantList avatarColors(const QString& name);
+    Q_INVOKABLE static QString initialFor(const QString& name);
 
     // Test only: drops the connection as if the network failed.
     void simulateConnectionLoss();

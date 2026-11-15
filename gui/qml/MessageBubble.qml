@@ -1,0 +1,117 @@
+import QtQuick
+import Intercli.Backend
+import "Format.js" as Format
+
+// One message row: optional time separator and sender label, then either a
+// bubble (incoming left, outgoing right) or a centred system line.
+Item {
+    id: root
+    required property int kind          // 0 incoming, 1 outgoing, 2 system
+    required property string sender
+    required property string text
+    required property var time
+    required property bool firstInRun
+    required property bool lastInRun
+    required property bool showSender
+    required property bool showTimestamp
+
+    readonly property real maxBubbleWidth: Math.max(160, width * 0.62)
+
+    width: ListView.view ? ListView.view.width : 0
+    height: column.implicitHeight + (lastInRun ? 8 : 3)
+
+    Column {
+        id: column
+        width: parent.width
+        spacing: 0
+
+        Text {
+            visible: root.showTimestamp
+            width: parent.width
+            topPadding: 8
+            bottomPadding: 10
+            horizontalAlignment: Text.AlignHCenter
+            text: Format.separator(root.time)
+            color: Theme.textTertiary
+            font.pixelSize: 11
+            font.weight: Font.Medium
+        }
+
+        Text {
+            visible: root.showSender
+            leftPadding: 14
+            bottomPadding: 3
+            text: root.sender
+            color: Theme.textTertiary
+            font.pixelSize: 11
+        }
+
+        Text {
+            visible: root.kind === 2
+            width: parent.width
+            topPadding: 6
+            bottomPadding: 6
+            horizontalAlignment: Text.AlignHCenter
+            wrapMode: Text.Wrap
+            text: root.text
+            color: Theme.textTertiary
+            font.pixelSize: 11
+        }
+
+        Item {
+            visible: root.kind !== 2
+            width: parent.width
+            height: bubble.height
+
+            Rectangle {
+                id: bubble
+                x: root.kind === 1 ? parent.width - width : 0
+                width: Math.min(body.implicitWidth, root.maxBubbleWidth - 24) + 24
+                height: body.height + 14
+                radius: Theme.radiusBubble
+                color: root.kind === 1 ? Theme.accent : Theme.raised2
+
+                // The tail: one squared-off corner on the last bubble of a run.
+                Rectangle {
+                    visible: root.lastInRun
+                    width: Theme.radiusBubble
+                    height: Theme.radiusBubble
+                    anchors.bottom: parent.bottom
+                    anchors.left: root.kind === 1 ? undefined : parent.left
+                    anchors.right: root.kind === 1 ? parent.right : undefined
+                    color: parent.color
+                    radius: 5
+                    z: -1
+                }
+                Rectangle {
+                    visible: root.lastInRun
+                    width: Theme.radiusBubble
+                    height: Theme.radiusBubble
+                    anchors.bottom: parent.bottom
+                    anchors.left: root.kind === 1 ? undefined : parent.left
+                    anchors.right: root.kind === 1 ? parent.right : undefined
+                    anchors.bottomMargin: 5
+                    anchors.leftMargin: root.kind === 1 ? 0 : 5
+                    anchors.rightMargin: root.kind === 1 ? 5 : 0
+                    color: parent.color
+                }
+
+                TextEdit {
+                    id: body
+                    x: 12
+                    y: 7
+                    width: Math.min(implicitWidth, root.maxBubbleWidth - 24)
+                    readOnly: true
+                    selectByMouse: true
+                    textFormat: TextEdit.PlainText
+                    wrapMode: TextEdit.Wrap
+                    text: root.text
+                    color: root.kind === 1 ? "white" : Theme.text
+                    selectionColor: root.kind === 1 ? Qt.rgba(1, 1, 1, 0.35) : Theme.accent
+                    selectedTextColor: "white"
+                    font.pixelSize: 14
+                }
+            }
+        }
+    }
+}

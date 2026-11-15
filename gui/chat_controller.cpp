@@ -74,6 +74,15 @@ int ChatController::utf8Length(const QString& text) {
     return Intercli::utf8Length(text);
 }
 
+QVariantList ChatController::avatarColors(const QString& name) {
+    const auto pair = Intercli::avatarColors(name);
+    return {pair.first, pair.second};
+}
+
+QString ChatController::initialFor(const QString& name) {
+    return Intercli::initialFor(name);
+}
+
 // Every callback hops onto the UI thread and is dropped if the connection it
 // came from has since been abandoned.
 std::shared_ptr<SecureComm::ChatClient> ChatController::makeClient() {

@@ -43,6 +43,13 @@ qt_add_qml_module(intercli_gui
         qml/PrimaryButton.qml
         qml/SignInView.qml
         qml/ChatView.qml
+        qml/Format.js
+        qml/Avatar.qml
+        qml/ConversationRow.qml
+        qml/Sidebar.qml
+        qml/MessageBubble.qml
+        qml/MessageList.qml
+        qml/Composer.qml
     RESOURCES
         fonts/InterVariable.ttf
 )
