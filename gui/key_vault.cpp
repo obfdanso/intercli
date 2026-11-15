@@ -67,10 +67,14 @@ QByteArray loadOrCreateHistoryKey(const QString& keyFilePath) {
     if (stored.isEmpty()) {
         return key;  // could not wrap it; use it for this run without saving
     }
-    if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        file.write(stored);
-        file.close();
-        file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    // Create the file fresh with owner-only permissions from the start (NewOnly
+    // also refuses to follow a planted link), so the key is never readable by others.
+    QFile::remove(keyFilePath);
+    if (file.open(QIODevice::WriteOnly | QIODevice::NewOnly, QFileDevice::ReadOwner | QFileDevice::WriteOwner)) {
+        if (file.write(stored) != stored.size()) {
+            file.close();
+            QFile::remove(keyFilePath);
+        }
     }
     return key;
 }
