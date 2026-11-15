@@ -2,6 +2,7 @@
 // joiner's finder lists what answers. Runs on loopback with test ports.
 
 #include "discovery.h"
+#include "../crypto/crypto_utils.h"
 
 #include <QHostAddress>
 #include <QUdpSocket>
@@ -161,6 +162,22 @@ private slots:
             finder.injectReplyForTests(r, QHostAddress(QStringLiteral("10.2.%1.%2").arg(i / 200).arg(i % 200 + 1)));
         }
         QCOMPARE(finder.rowCount(), 64);
+    }
+
+    // The safety code is worked out here from the announced key, never taken
+    // from the answer itself.
+    void safety_code_is_computed_locally() {
+        ChatFinder finder;
+        finder.setTimingForTests(200, 5000);
+        finder.start(kPort);
+        const QByteArray reply = QByteArray("INTERCLI!2") +
+            "{\"id\":\"chat-7\",\"name\":\"Esi chat\",\"host\":\"Esi\",\"port\":8080,\"people\":1,"
+            "\"code\":\"0000 0000 0000 0000 0000\",\"key\":\"" + QByteArray(64, 'a') + "\"}";
+        finder.injectReplyForTests(reply, QHostAddress(QStringLiteral("192.168.1.40")));
+        const auto chat = finder.find(QStringLiteral("chat-7"));
+        QVERIFY(chat.has_value());
+        const std::vector<uint8_t> key(32, 0xaa);
+        QCOMPARE(chat->safetyCode, QString::fromStdString(SecureComm::safety_code(key)));
     }
 
     void garbage_is_ignored() {
