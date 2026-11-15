@@ -68,6 +68,24 @@ static void close_socket(intptr_t s) {
 // on Windows, neither shutdown() nor a signal interrupts a recv() or accept()
 // already in progress.
 // poll() rather than select(): FD_SET on a descriptor >= FD_SETSIZE writes out of bounds.
+static void shutdown_socket(intptr_t s) {
+#ifdef _WIN32
+    shutdown(static_cast<SOCKET>(s), SD_BOTH);
+#else
+    shutdown(static_cast<int>(s), SHUT_RDWR);
+#endif
+}
+
+static void set_send_timeout(intptr_t s, int ms) {
+#ifdef _WIN32
+    const DWORD value = static_cast<DWORD>(ms);
+    setsockopt(static_cast<SOCKET>(s), SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&value), sizeof(value));
+#else
+    timeval value{ms / 1000, (ms % 1000) * 1000};
+    setsockopt(static_cast<int>(s), SOL_SOCKET, SO_SNDTIMEO, &value, sizeof(value));
+#endif
+}
+
 static int wait_readable(intptr_t s, int timeout_ms) {
     pollfd p{};
     p.events = POLLIN;
@@ -101,7 +119,7 @@ struct ClientConnection {
 
 struct SecureServer::Impl {
     ServerOptions options_;
-    intptr_t server_socket_;
+    std::atomic<intptr_t> server_socket_;
     std::atomic<bool> running_;
     std::unique_ptr<CryptoManager> crypto_manager_;
     std::unique_ptr<SessionManager> session_manager_;
@@ -189,7 +207,7 @@ struct SecureServer::Impl {
 
     // Checks the lockout and counts the guess in one step, before the code is
     // compared, so guesses sent at once on several connections can't slip past
-    // the limit. False: locked out, don't compare.
+    // the limit. False: locked out or out of guesses, don't compare.
     bool begin_guess(const std::string& address) {
         if (exempt(address)) {
             return true;
@@ -198,11 +216,24 @@ struct SecureServer::Impl {
         const auto now = std::chrono::steady_clock::now();
         Guesses& g = guesses_[address];
         g.last_seen = now;
-        if (now < g.locked_until) {
+        if (now < g.locked_until || g.count >= options_.max_wrong_codes_per_address) {
             return false;
         }
-        if (++g.count >= options_.max_wrong_codes_per_address) {
-            // Each lockout lasts twice as long as the one before, up to an hour.
+        ++g.count;
+        return true;
+    }
+
+    // The guess was wrong. Once the address has used up its guesses it is
+    // locked out; each lockout lasts twice as long as the one before, up to an
+    // hour. (A right guess never locks anyone out.)
+    void guess_failed(const std::string& address) {
+        if (exempt(address)) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(guesses_mutex_);
+        Guesses& g = guesses_[address];
+        if (g.count >= options_.max_wrong_codes_per_address) {
+            const auto now = std::chrono::steady_clock::now();
             const auto factor = 1LL << (std::min)(g.lockouts, 6);
             const auto length = (std::min<std::chrono::seconds>)(options_.lockout * factor, std::chrono::hours(1));
             g.locked_until = now + length;
@@ -211,7 +242,6 @@ struct SecureServer::Impl {
             LogLine(this, false) << "Locked out " << address << " for " << length.count()
                                  << " s after too many wrong room codes";
         }
-        return true;
     }
 
     // A right code: that guess doesn't count against the address.
@@ -273,9 +303,9 @@ struct SecureServer::Impl {
             if (error) {
                 *error = reason;
             }
-            if (server_socket_ >= 0) {
-                close_socket(server_socket_);
-                server_socket_ = -1;
+            const intptr_t listener = server_socket_.exchange(-1);
+            if (listener >= 0) {
+                close_socket(listener);
             }
             return false;
         };
@@ -357,6 +387,8 @@ struct SecureServer::Impl {
             auto conn = std::make_shared<ClientConnection>();
             conn->socket = client_socket;
             conn->address = addr_text;
+            // A client that stops reading must not hold a relay forever.
+            set_send_timeout(client_socket, 5000);
             {
                 std::lock_guard<std::mutex> lock(connections_mutex_);
                 connections_.insert(conn);
@@ -378,14 +410,19 @@ struct SecureServer::Impl {
             cleanup_thread_.join();
         }
 
-        if (server_socket_ >= 0) {
-            close_socket(server_socket_);
-            server_socket_ = -1;
+        const intptr_t listener = server_socket_.exchange(-1);
+        if (listener >= 0) {
+            close_socket(listener);
         }
 
-        // Client threads poll running_ while they wait for data, so each one
-        // notices and finishes on its own; wait for all of them.
+        // Cut every connection now. A relay to a client that has stopped
+        // reading can be stuck in send(); shutting the socket down wakes it,
+        // so ending the chat never waits on someone else's connection.
         std::unique_lock<std::mutex> lock(connections_mutex_);
+        for (const auto& c : connections_) {
+            shutdown_socket(c->socket);
+        }
+        // Each client thread then notices and finishes on its own.
         connections_cv_.wait(lock, [this] { return connections_.empty(); });
     }
 
@@ -431,15 +468,17 @@ struct SecureServer::Impl {
         }
         LogLine(this, false) << "Client disconnected";
 
-        // This must be the last thing the thread does: once the entry is gone,
-        // stop() may return and the server may be destroyed. The socket is closed
-        // under send_mutex so a relaying thread cannot write to it mid-close, or to
-        // an unrelated connection that reuses the descriptor afterwards.
-        std::lock_guard<std::mutex> lock(connections_mutex_);
+        // The socket is closed under send_mutex so a relaying thread cannot write
+        // to it mid-close, or to an unrelated connection that reuses the
+        // descriptor afterwards. It is done before taking connections_mutex_, so
+        // stop() (which holds that while cutting connections) never waits on a
+        // relay. Erasing the entry must be the last thing the thread does: once
+        // it is gone, stop() may return and the server may be destroyed.
         {
             std::lock_guard<std::mutex> send_lock(conn->send_mutex);
             close_socket(conn->socket);
         }
+        std::lock_guard<std::mutex> lock(connections_mutex_);
         connections_.erase(conn);
         connections_cv_.notify_all();
     }
@@ -624,6 +663,7 @@ struct SecureServer::Impl {
                         if (!options_.room_code.empty() &&
                             !room_code_matches(get_chat_field(chat.recipient, MAX_NAME_LEN))) {
                             // Slow down guessing, and give up on a connection after five tries.
+                            guess_failed(conn->address);
                             std::this_thread::sleep_for(std::chrono::seconds(1));
                             ChatMessage refusal = make_chat(ChatType::REGISTER_FAIL);
                             set_chat_text(refusal, "Wrong room code");

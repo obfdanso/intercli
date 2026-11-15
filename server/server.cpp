@@ -84,8 +84,19 @@ std::vector<uint8_t> load_or_create_identity() {
     if (wrapped.empty()) {
         return key;  // use it for this run only
     }
-    std::ofstream out(path, std::ios::binary);
-    out.write(reinterpret_cast<const char*>(wrapped.data()), static_cast<std::streamsize>(wrapped.size()));
+    // Created exclusively and checked: two servers starting at once can't each
+    // save a different key, and a half-written file is removed, not kept.
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return key;  // someone else just saved one; use ours for this run only
+    }
+    DWORD written = 0;
+    const BOOL ok = WriteFile(file, wrapped.data(), static_cast<DWORD>(wrapped.size()), &written, nullptr) &&
+                    written == wrapped.size() && FlushFileBuffers(file);
+    CloseHandle(file);
+    if (!ok) {
+        DeleteFileW(path.c_str());
+    }
     return key;
 }
 #else

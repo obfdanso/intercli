@@ -2,6 +2,7 @@
 
 #include "secure_server.h"
 #include "chat_client.h"
+#include "frame_proxy.h"
 
 #include <atomic>
 #include <chrono>
@@ -240,6 +241,65 @@ static void room_code_tests() {
         host2.connect("127.0.0.1", 18096, &err);
         host2.request_name("host", "K7P29Q");
         check(host_ears2.wait("registered:host"), "the host's own app can still join on its own machine");
+    }
+
+    std::cout << "A right code never locks you out" << std::endl;
+    {
+        ServerOptions ok_options;
+        ok_options.port = 18098;
+        ok_options.room_code = "K7P29Q";
+        ok_options.max_wrong_codes_per_address = 3;
+        Running ok_server(ok_options);
+        Ears t_ears;
+        ChatClient typo(t_ears.events_for());
+        typo.connect("127.0.0.1", 18098, &err);
+        typo.request_name("t1", "K7P29X");
+        typo.request_name("t2", "K7P29Y");
+        typo.request_name("t3", "K7P29Q");
+        check(t_ears.wait("registered:t3", 8000), "two typos then the right code joins");
+        typo.disconnect();
+        Ears again_ears;
+        ChatClient again(again_ears.events_for());
+        again.connect("127.0.0.1", 18098, &err);
+        again.request_name("t4", "K7P29Q");
+        check(again_ears.wait("registered:t4"), "joining again right after is not locked out");
+    }
+
+    std::cout << "Stopping with a joiner that stopped reading" << std::endl;
+    {
+        // A relay to someone who never reads blocks in send(); stopping the
+        // server (the host ending the chat) must not wait for it forever.
+        ServerOptions slow_options;
+        slow_options.port = 18097;
+        auto slow = std::make_unique<Running>(slow_options);
+        Ears a_ears;
+        ChatClient a(a_ears.events_for());
+        a.connect("127.0.0.1", 18097, &err);
+        a.request_name("talker");
+        check(a_ears.wait("registered:talker"), "a talker joins");
+        FrameProxy proxy(18097);
+        Ears b_ears;
+        ChatClient b(b_ears.events_for());
+        b.connect("127.0.0.1", proxy.port(), &err);
+        b.request_name("sleeper");
+        check(b_ears.wait("registered:sleeper"), "a sleeper joins through the proxy");
+        proxy.stall_to_client();
+        std::atomic<bool> flooding{true};
+        std::thread flood([&] {
+            const std::string text(1000, 'x');
+            for (int i = 0; i < 3000 && flooding; ++i) {
+                if (!a.send_broadcast(text)) break;
+            }
+        });
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+        const auto t = std::chrono::steady_clock::now();
+        slow->server.stop();
+        const long long took = ms_since(t);
+        check(took < 3000, "stop returns with a stalled joiner (" + std::to_string(took) + " ms)");
+        flooding = false;
+        a.disconnect();
+        flood.join();
+        slow.reset();
     }
 
     std::cout << "Open server" << std::endl;

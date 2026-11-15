@@ -7,6 +7,7 @@
 #include "common.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <mutex>
@@ -80,6 +81,10 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         send_frame(client_, frame);
     }
+    // Stop reading what the server sends, like a client that has stopped
+    // reading: the server's sends to it back up and block.
+    void stall_to_client() { stall_down_ = true; }
+
     // Send the client a frame too short to hold a header.
     void truncate_to_client() {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -140,7 +145,14 @@ private:
 
     void pump(sock from, sock to, bool upstream) {
         std::vector<uint8_t> frame;
-        while (!stop_ && read_frame(from, &frame)) {
+        while (!stop_) {
+            if (!upstream && stall_down_) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                continue;
+            }
+            if (!read_frame(from, &frame)) {
+                break;
+            }
             std::lock_guard<std::mutex> lock(mutex_);
             if (upstream && is_encrypted(frame)) {
                 last_up_ = frame;
@@ -168,6 +180,7 @@ private:
     std::thread accept_thread_, up_, down_;
     std::atomic<bool> stop_{false};
     std::atomic<bool> tamper_up_{false};
+    std::atomic<bool> stall_down_{false};
     std::mutex mutex_;
     std::vector<uint8_t> last_up_;
 };
