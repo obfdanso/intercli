@@ -50,6 +50,8 @@ Item {
             height: 36
 
             Text {
+                // Peer and server text is shown as typed, never as markup.
+                textFormat: Text.PlainText
                 id: nameText
                 anchors.left: parent.left
                 anchors.right: timeText.left
@@ -62,6 +64,8 @@ Item {
                 elide: Text.ElideRight
             }
             Text {
+                // Peer and server text is shown as typed, never as markup.
+                textFormat: Text.PlainText
                 id: timeText
                 anchors.right: parent.right
                 anchors.baseline: nameText.baseline
@@ -70,6 +74,8 @@ Item {
                 font.pixelSize: 11
             }
             Text {
+                // Peer and server text is shown as typed, never as markup.
+                textFormat: Text.PlainText
                 anchors.left: parent.left
                 anchors.right: badge.visible ? badge.left : parent.right
                 anchors.rightMargin: badge.visible ? 6 : 0
@@ -91,6 +97,8 @@ Item {
                 radius: height / 2
                 color: Theme.accent
                 Text {
+                    // Peer and server text is shown as typed, never as markup.
+                    textFormat: Text.PlainText
                     id: countText
                     visible: row.unread > 1
                     anchors.centerIn: parent

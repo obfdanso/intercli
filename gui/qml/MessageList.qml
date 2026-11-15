@@ -66,6 +66,8 @@ Item {
         radius: 14
         color: Theme.accent
         Text {
+            // Peer and server text is shown as typed, never as markup.
+            textFormat: Text.PlainText
             id: pillText
             anchors.centerIn: parent
             text: "New messages ↓"

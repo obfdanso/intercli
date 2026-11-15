@@ -71,6 +71,8 @@ Item {
         }
 
         Text {
+            // Peer and server text is shown as typed, never as markup.
+            textFormat: Text.PlainText
             id: counter
             visible: root.bytes > 900
             anchors.right: parent.right
@@ -100,6 +102,8 @@ Item {
         Accessible.onPressAction: root.send()
 
         Text {
+            // Peer and server text is shown as typed, never as markup.
+            textFormat: Text.PlainText
             anchors.centerIn: parent
             text: "↑"
             color: "white"

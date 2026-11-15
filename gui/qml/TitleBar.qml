@@ -27,12 +27,16 @@ Item {
         visible: Frame.customFrame
 
         Text {
+            // Peer and server text is shown as typed, never as markup.
+            textFormat: Text.PlainText
             text: "◆"
             color: Theme.accent
             font.pixelSize: 11
             anchors.verticalCenter: parent.verticalCenter
         }
         Text {
+            // Peer and server text is shown as typed, never as markup.
+            textFormat: Text.PlainText
             text: "intercli"
             color: Theme.textSecondary
             font.pixelSize: 12

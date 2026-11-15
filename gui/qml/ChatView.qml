@@ -69,12 +69,16 @@ Item {
                 anchors.leftMargin: 10
                 anchors.verticalCenter: parent.verticalCenter
                 Text {
+                    // Peer and server text is shown as typed, never as markup.
+                    textFormat: Text.PlainText
                     text: root.everyone ? "Everyone" : root.peer
                     color: Theme.text
                     font.pixelSize: 14
                     font.weight: Font.DemiBold
                 }
                 Text {
+                    // Peer and server text is shown as typed, never as markup.
+                    textFormat: Text.PlainText
                     text: root.everyone ? (Chat.onlineCount + 1) + " online" : "Direct message"
                     color: Theme.textTertiary
                     font.pixelSize: 11
@@ -94,6 +98,8 @@ Item {
                 Accessible.name: "Details"
                 Accessible.onPressAction: prefs.detailsOpen = !prefs.detailsOpen
                 Text {
+                    // Peer and server text is shown as typed, never as markup.
+                    textFormat: Text.PlainText
                     anchors.centerIn: parent
                     text: ""
                     font.family: Theme.iconFont

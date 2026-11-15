@@ -21,7 +21,9 @@ QtObject {
     readonly property color closeHover: "#C42B1C"
 
     readonly property string fontFamily: Qt.application.font.family
-    readonly property string iconFont: "Segoe Fluent Icons"
+    // Windows 11 ships Segoe Fluent Icons; Windows 10 has the same glyphs in Segoe MDL2 Assets.
+    readonly property string iconFont: Qt.fontFamilies().indexOf("Segoe Fluent Icons") >= 0
+                                       ? "Segoe Fluent Icons" : "Segoe MDL2 Assets"
 
     readonly property int radiusBubble: 18
     readonly property int radiusCard: 10

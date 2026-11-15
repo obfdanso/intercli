@@ -45,6 +45,8 @@ Item {
             spacing: 0
 
             Text {
+                // Peer and server text is shown as typed, never as markup.
+                textFormat: Text.PlainText
                 width: parent.width
                 text: "Save your messages on this computer?"
                 color: Theme.text
@@ -53,6 +55,8 @@ Item {
                 wrapMode: Text.Wrap
             }
             Text {
+                // Peer and server text is shown as typed, never as markup.
+                textFormat: Text.PlainText
                 width: parent.width
                 topPadding: 8
                 text: "If you save them, your chats with this name on this server come back next time you sign in. They're encrypted with a key tied to your Windows account."
@@ -77,6 +81,8 @@ Item {
                     Accessible.name: "Don't Save"
                     Accessible.onPressAction: Chat.setHistoryChoice(2, false)
                     Text {
+                        // Peer and server text is shown as typed, never as markup.
+                        textFormat: Text.PlainText
                         id: dontText
                         anchors.centerIn: parent
                         text: "Don't Save"

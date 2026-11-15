@@ -26,6 +26,8 @@ Item {
         spacing: 0
 
         Text {
+            // Peer and server text is shown as typed, never as markup.
+            textFormat: Text.PlainText
             visible: root.showTimestamp
             width: parent.width
             topPadding: 8
@@ -38,6 +40,8 @@ Item {
         }
 
         Text {
+            // Peer and server text is shown as typed, never as markup.
+            textFormat: Text.PlainText
             visible: root.showSender
             leftPadding: 14
             bottomPadding: 3
@@ -47,6 +51,8 @@ Item {
         }
 
         Text {
+            // Peer and server text is shown as typed, never as markup.
+            textFormat: Text.PlainText
             visible: root.kind === 2
             width: parent.width
             topPadding: 6

@@ -25,6 +25,8 @@ Item {
     }
 
     Text {
+        // Peer and server text is shown as typed, never as markup.
+        textFormat: Text.PlainText
         anchors.centerIn: parent
         text: root.glyph
         font.family: Theme.iconFont

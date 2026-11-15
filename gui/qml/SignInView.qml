@@ -47,12 +47,16 @@ Item {
                 Layout.alignment: Qt.AlignHCenter
                 spacing: 10
                 Text {
+                    // Peer and server text is shown as typed, never as markup.
+                    textFormat: Text.PlainText
                     text: "◆"
                     color: Theme.accent
                     font.pixelSize: 20
                     anchors.verticalCenter: parent.verticalCenter
                 }
                 Text {
+                    // Peer and server text is shown as typed, never as markup.
+                    textFormat: Text.PlainText
                     text: "intercli"
                     color: Theme.text
                     font.pixelSize: 24
@@ -61,6 +65,8 @@ Item {
                 }
             }
             Text {
+                // Peer and server text is shown as typed, never as markup.
+                textFormat: Text.PlainText
                 Layout.alignment: Qt.AlignHCenter
                 Layout.topMargin: 6
                 text: "Encrypted chat"
@@ -69,6 +75,8 @@ Item {
             }
 
             Text {
+                // Peer and server text is shown as typed, never as markup.
+                textFormat: Text.PlainText
                 Layout.topMargin: 28
                 text: "Server"
                 color: Theme.textSecondary
@@ -107,6 +115,8 @@ Item {
                 }
             }
             Text {
+                // Peer and server text is shown as typed, never as markup.
+                textFormat: Text.PlainText
                 Layout.topMargin: 6
                 Layout.fillWidth: true
                 visible: Chat.connectError.length > 0
@@ -117,6 +127,8 @@ Item {
             }
 
             Text {
+                // Peer and server text is shown as typed, never as markup.
+                textFormat: Text.PlainText
                 Layout.topMargin: 16
                 text: "Your name"
                 color: Theme.textSecondary
@@ -139,6 +151,8 @@ Item {
                 Component.onCompleted: forceActiveFocus()
             }
             Text {
+                // Peer and server text is shown as typed, never as markup.
+                textFormat: Text.PlainText
                 Layout.topMargin: 6
                 Layout.fillWidth: true
                 visible: text.length > 0

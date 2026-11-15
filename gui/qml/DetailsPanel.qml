@@ -34,6 +34,8 @@ Rectangle {
         width: parent ? parent.width : 0
         height: 34
         Text {
+            // Peer and server text is shown as typed, never as markup.
+            textFormat: Text.PlainText
             x: 12
             anchors.verticalCenter: parent.verticalCenter
             text: parent.label
@@ -41,6 +43,8 @@ Rectangle {
             font.pixelSize: 12
         }
         Text {
+            // Peer and server text is shown as typed, never as markup.
+            textFormat: Text.PlainText
             anchors.right: parent.right
             anchors.rightMargin: 12
             anchors.verticalCenter: parent.verticalCenter
@@ -79,6 +83,8 @@ Rectangle {
                 name: panel.peer
             }
             Text {
+                // Peer and server text is shown as typed, never as markup.
+                textFormat: Text.PlainText
                 anchors.horizontalCenter: parent.horizontalCenter
                 topPadding: 10
                 text: panel.everyone ? "Everyone" : panel.peer
@@ -87,6 +93,8 @@ Rectangle {
                 font.weight: Font.DemiBold
             }
             Text {
+                // Peer and server text is shown as typed, never as markup.
+                textFormat: Text.PlainText
                 anchors.horizontalCenter: parent.horizontalCenter
                 topPadding: 3
                 text: panel.everyone ? (Chat.onlineCount + 1) + " online"
@@ -115,6 +123,8 @@ Rectangle {
                             anchors.verticalCenter: parent.verticalCenter
                         }
                         Text {
+                            // Peer and server text is shown as typed, never as markup.
+                            textFormat: Text.PlainText
                             anchors.left: a.right
                             anchors.leftMargin: 8
                             anchors.verticalCenter: parent.verticalCenter
@@ -127,6 +137,8 @@ Rectangle {
             }
 
             Text {
+                // Peer and server text is shown as typed, never as markup.
+                textFormat: Text.PlainText
                 topPadding: 22
                 bottomPadding: 6
                 leftPadding: 4
@@ -171,6 +183,8 @@ Rectangle {
                 Accessible.name: "Rotate Key Now"
                 Accessible.onPressAction: Chat.rotateKey()
                 Text {
+                    // Peer and server text is shown as typed, never as markup.
+                    textFormat: Text.PlainText
                     anchors.centerIn: parent
                     text: "Rotate Key Now"
                     color: Theme.accent
@@ -201,6 +215,8 @@ Rectangle {
                     width: parent.width
                     height: 44
                     Text {
+                        // Peer and server text is shown as typed, never as markup.
+                        textFormat: Text.PlainText
                         x: 12
                         anchors.verticalCenter: parent.verticalCenter
                         width: parent.width - 70
@@ -233,6 +249,8 @@ Rectangle {
                     topPadding: 0
                     spacing: 8
                     Text {
+                        // Peer and server text is shown as typed, never as markup.
+                        textFormat: Text.PlainText
                         width: parent.width - 24
                         text: "Delete messages already saved?"
                         color: Theme.textSecondary
@@ -278,6 +296,8 @@ Rectangle {
             }
 
             Text {
+                // Peer and server text is shown as typed, never as markup.
+                textFormat: Text.PlainText
                 width: parent.width
                 topPadding: 12
                 leftPadding: 4
@@ -304,6 +324,8 @@ Rectangle {
         Accessible.name: "Sign Out"
         Accessible.onPressAction: Chat.signOut()
         Text {
+            // Peer and server text is shown as typed, never as markup.
+            textFormat: Text.PlainText
             anchors.centerIn: parent
             text: "Sign Out"
             color: Theme.danger

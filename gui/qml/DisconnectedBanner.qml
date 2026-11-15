@@ -21,6 +21,8 @@ Rectangle {
     Behavior on height { NumberAnimation { duration: Theme.animNormal; easing.type: Easing.OutCubic } }
 
     Text {
+        // Peer and server text is shown as typed, never as markup.
+        textFormat: Text.PlainText
         anchors.left: parent.left
         anchors.leftMargin: 18
         anchors.right: action.left
@@ -58,6 +60,8 @@ Rectangle {
                 implicitHeight: 12
             }
             Text {
+                // Peer and server text is shown as typed, never as markup.
+                textFormat: Text.PlainText
                 id: actionText
                 text: Chat.needsSignIn ? "Sign in again" : "Reconnect"
                 color: "white"

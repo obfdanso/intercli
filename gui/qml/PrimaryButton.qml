@@ -22,6 +22,8 @@ Button {
                 anchors.verticalCenter: parent.verticalCenter
             }
             Text {
+                // Peer and server text is shown as typed, never as markup.
+                textFormat: Text.PlainText
                 text: button.busy ? button.busyText : button.text
                 color: "white"
                 opacity: button.enabled || button.busy ? 1 : 0.5

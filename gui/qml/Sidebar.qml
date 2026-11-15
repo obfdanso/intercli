@@ -30,6 +30,8 @@ Rectangle {
         onTextChanged: Chat.setSearch(text)
 
         Text {
+            // Peer and server text is shown as typed, never as markup.
+            textFormat: Text.PlainText
             x: 10
             anchors.verticalCenter: parent.verticalCenter
             text: ""
@@ -59,6 +61,8 @@ Rectangle {
             height: section === "everyone" ? 0 : 28
             visible: section !== "everyone"
             Text {
+                // Peer and server text is shown as typed, never as markup.
+                textFormat: Text.PlainText
                 x: 18
                 anchors.bottom: parent.bottom
                 anchors.bottomMargin: 6
