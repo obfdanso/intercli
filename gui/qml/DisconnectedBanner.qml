@@ -12,9 +12,10 @@ Rectangle {
     clip: true
     color: Qt.rgba(1, 69 / 255, 58 / 255, 0.12)
 
+    signal signOutRequested()
     function act() {
         if (Chat.needsSignIn)
-            Chat.signOut()
+            banner.signOutRequested()
         else
             Chat.reconnect()
     }

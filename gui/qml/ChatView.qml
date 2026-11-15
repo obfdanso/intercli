@@ -126,6 +126,7 @@ Item {
 
         DisconnectedBanner {
             id: banner
+            onSignOutRequested: root.signOutRequested()
             anchors.top: header.bottom
             anchors.left: parent.left
             anchors.right: parent.right
