@@ -91,6 +91,7 @@ struct ClientConnection {
     uint32_t          sent_count = 0;  // guarded by send_mutex
     uint32_t          tx_seq = 0;      // last frame number sent; guarded by send_mutex
     uint32_t          rx_seq = 0;      // last frame number received; receive thread only
+    int               wrong_codes = 0; // wrong room codes tried; receive thread only
     std::atomic<bool> alive{true};
 };
 
@@ -129,6 +130,8 @@ struct SecureServer::Impl {
         session_manager_ = std::make_unique<SessionManager>();
         key_manager_ = std::make_unique<KeyManager>();
         
+        options_.room_code = normalize_room_code(options_.room_code);
+
         // The long-term identity the server signs every handshake with.
         identity_ = options_.identity_private.size() == 32
             ? crypto_manager_->identity_from_private(options_.identity_private)
@@ -479,6 +482,22 @@ struct SecureServer::Impl {
                     ChatMessage chat = deserialize_chat(decrypted_data);
 
                     if (chat.type == ChatType::REGISTER) {
+                        // The room code comes first, so someone without it cannot
+                        // even learn which names are taken.
+                        if (!options_.room_code.empty() &&
+                            normalize_room_code(get_chat_field(chat.recipient, MAX_NAME_LEN)) != options_.room_code) {
+                            // Slow down guessing, and give up on a connection after five tries.
+                            std::this_thread::sleep_for(std::chrono::seconds(1));
+                            ChatMessage refusal = make_chat(ChatType::REGISTER_FAIL);
+                            set_chat_text(refusal, "Wrong room code");
+                            send_chat(conn, refusal);
+                            if (++conn->wrong_codes >= 5) {
+                                LogLine(this, false) << "Closed a connection after five wrong room codes";
+                                break;
+                            }
+                            continue;
+                        }
+
                         const std::string wanted = get_chat_text(chat);
                         std::string reason;
                         if (!is_valid_name(wanted)) {

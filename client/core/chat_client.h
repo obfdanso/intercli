@@ -77,7 +77,8 @@ public:
     void cancel();
 
     // The server's answer arrives through on_registered or on_register_failed.
-    bool request_name(const std::string& name);
+    // room_code is needed for a hosted chat; it is ignored by an open server.
+    bool request_name(const std::string& name, const std::string& room_code = "");
 
     // Text over MAX_TEXT_LEN bytes is rejected (returns false, nothing is sent).
     bool send_direct(const std::string& to, const std::string& text);

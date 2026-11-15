@@ -379,9 +379,12 @@ SessionStatus ChatClient::status() const {
     return st;
 }
 
-bool ChatClient::request_name(const std::string& name) {
+bool ChatClient::request_name(const std::string& name, const std::string& room_code) {
     ChatMessage msg = make_chat(ChatType::REGISTER);
     set_chat_text(msg, name);
+    // The code travels in the otherwise unused recipient field, inside the
+    // encrypted channel to the (now authenticated) server.
+    set_chat_field(msg.recipient, MAX_NAME_LEN, normalize_room_code(room_code));
     return send_chat(msg);
 }
 
