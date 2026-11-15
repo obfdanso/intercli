@@ -117,6 +117,10 @@ void HostSession::stop() {
     }
 }
 
+int HostSession::peopleNow() const {
+    return server_ ? static_cast<int>(server_->people()) : 0;
+}
+
 bool HostSession::running() const {
     return server_ != nullptr;
 }

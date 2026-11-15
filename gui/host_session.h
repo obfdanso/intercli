@@ -37,6 +37,8 @@ public:
     QString chatName() const { return chat_name_; }
     quint16 port() const { return port_; }
     int people() const { return people_; }
+    // Asks the server right now (people() is refreshed every couple of seconds).
+    int peopleNow() const;
     QByteArray identityPublic() const { return identity_public_; }
     QString safetyCode() const;
 

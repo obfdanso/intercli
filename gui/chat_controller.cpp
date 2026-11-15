@@ -355,7 +355,8 @@ void ChatController::endChat() {
 }
 
 bool ChatController::needsEndChatConfirm() const {
-    return hosting_ && peopleInChat() > 1;
+    // The live count: someone who joined a moment ago counts too.
+    return hosting_ && host_session_ && host_session_->peopleNow() > 1;
 }
 
 QString ChatController::roomCode() const {
@@ -462,12 +463,15 @@ void ChatController::onRegisterFailed(const QString& reason) {
         ++generation_;
         abandonConnection();
         const bool codeProblem = reason == QStringLiteral("Wrong room code") || reason.startsWith(QStringLiteral("Too many wrong"));
+        const bool wasHosting = hosting_;
         if (hosting_ && host_session_) {
             host_session_->stop();
             hosting_ = false;
             emit hostingChanged();
         }
-        if (codeProblem) {
+        if (wasHosting) {
+            setErrors(QString(), QString(), QString(), reason);  // shown by the Host button
+        } else if (codeProblem) {
             setErrors(QString(), QString(), reason);
         } else {
             setErrors(QString(), reason);
@@ -697,7 +701,16 @@ void ChatController::onDisconnected(const QString& reason) {
     } else if (state_ == Connecting) {
         ++generation_;
         abandonConnection();
-        setErrors(reason, QString());
+        if (hosting_ && host_session_) {
+            // Our own join failed: don't leave the chat running with nobody
+            // able to sign in or host again.
+            host_session_->stop();
+            hosting_ = false;
+            emit hostingChanged();
+            setErrors(QString(), QString(), QString(), reason);
+        } else {
+            setErrors(reason, QString());
+        }
         setState(SignedOut);
     } else if (state_ == Reconnecting) {
         ++generation_;

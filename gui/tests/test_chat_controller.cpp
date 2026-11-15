@@ -356,6 +356,8 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(joiner.nearby()->find(chatId).has_value(), 6000);
         joiner.joinChat(chatId, code.toLower(), "jojo");
         QTRY_COMPARE_WITH_TIMEOUT(joiner.state(), ChatController::Online, kWait);
+        // Closing right after someone joins must still ask first.
+        QVERIFY(host.needsEndChatConfirm());
         QCOMPARE(joiner.safetyCode(), host.safetyCode());
         QVERIFY(joiner.historyIdentityForTests().startsWith("chat:" + chatId + "/"));
         QCOMPARE(joiner.rememberedCode(chatId), code);
