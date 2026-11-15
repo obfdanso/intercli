@@ -4,6 +4,7 @@
 // handshake, relays chat messages between registered names. server.exe and the
 // desktop app (when hosting a chat) both run it.
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -18,6 +19,11 @@ struct ServerOptions {
     uint16_t port = DEFAULT_PORT;
     // Normalised room code; empty means anyone may join.
     std::string room_code;
+    // Wrong room codes allowed from one address (across all its connections)
+    // before it is locked out; each further lockout lasts twice as long, up to
+    // an hour.
+    int max_wrong_codes_per_address = 10;
+    std::chrono::seconds lockout = std::chrono::seconds(60);
     // The server's long-term identity (32-byte Ed25519 private key). Empty: a
     // temporary identity is made for this run.
     std::vector<uint8_t> identity_private;

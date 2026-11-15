@@ -92,6 +92,7 @@ struct ClientConnection {
     uint32_t          tx_seq = 0;      // last frame number sent; guarded by send_mutex
     uint32_t          rx_seq = 0;      // last frame number received; receive thread only
     int               wrong_codes = 0; // wrong room codes tried; receive thread only
+    std::string       address;         // the client's IP address
     std::atomic<bool> alive{true};
 };
 
@@ -114,6 +115,47 @@ struct SecureServer::Impl {
     std::condition_variable stop_cv_;
     std::map<std::string, std::shared_ptr<ClientConnection>> registry_;
     std::mutex registry_mutex_;
+
+    // Wrong room codes per address, across connections, so guessing can't be
+    // sped up by opening more connections.
+    struct Guesses {
+        int count = 0;
+        int lockouts = 0;
+        std::chrono::steady_clock::time_point locked_until{};
+    };
+    std::map<std::string, Guesses> guesses_;
+    std::mutex guesses_mutex_;
+
+    bool locked_out(const std::string& address) {
+        std::lock_guard<std::mutex> lock(guesses_mutex_);
+        auto it = guesses_.find(address);
+        return it != guesses_.end() && std::chrono::steady_clock::now() < it->second.locked_until;
+    }
+
+    void record_wrong_code(const std::string& address) {
+        std::lock_guard<std::mutex> lock(guesses_mutex_);
+        Guesses& g = guesses_[address];
+        if (++g.count >= options_.max_wrong_codes_per_address) {
+            // Each lockout lasts twice as long as the one before, up to an hour.
+            const auto factor = 1LL << (std::min)(g.lockouts, 6);
+            const auto length = (std::min<std::chrono::seconds>)(options_.lockout * factor, std::chrono::hours(1));
+            g.locked_until = std::chrono::steady_clock::now() + length;
+            g.count = 0;
+            ++g.lockouts;
+            LogLine(this, false) << "Locked out " << address << " for " << length.count()
+                                 << " s after too many wrong room codes";
+        }
+    }
+
+    // Constant time, so how long the comparison takes says nothing about the code.
+    bool room_code_matches(const std::string& typed) const {
+        const std::string candidate = normalize_room_code(typed);
+        const std::string& code = options_.room_code;
+        if (candidate.size() != code.size()) {
+            return false;
+        }
+        return CRYPTO_memcmp(candidate.data(), code.data(), code.size()) == 0;
+    }
     IdentityKey identity_;
 
     explicit Impl(ServerOptions options)
@@ -229,6 +271,7 @@ struct SecureServer::Impl {
 
             auto conn = std::make_shared<ClientConnection>();
             conn->socket = client_socket;
+            conn->address = addr_text;
             {
                 std::lock_guard<std::mutex> lock(connections_mutex_);
                 connections_.insert(conn);
@@ -484,9 +527,16 @@ struct SecureServer::Impl {
                     if (chat.type == ChatType::REGISTER) {
                         // The room code comes first, so someone without it cannot
                         // even learn which names are taken.
+                        if (!options_.room_code.empty() && locked_out(conn->address)) {
+                            ChatMessage refusal = make_chat(ChatType::REGISTER_FAIL);
+                            set_chat_text(refusal, "Too many wrong room codes. Try again later.");
+                            send_chat(conn, refusal);
+                            break;
+                        }
                         if (!options_.room_code.empty() &&
-                            normalize_room_code(get_chat_field(chat.recipient, MAX_NAME_LEN)) != options_.room_code) {
+                            !room_code_matches(get_chat_field(chat.recipient, MAX_NAME_LEN))) {
                             // Slow down guessing, and give up on a connection after five tries.
+                            record_wrong_code(conn->address);
                             std::this_thread::sleep_for(std::chrono::seconds(1));
                             ChatMessage refusal = make_chat(ChatType::REGISTER_FAIL);
                             set_chat_text(refusal, "Wrong room code");

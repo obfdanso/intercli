@@ -133,6 +133,44 @@ static void room_code_tests() {
     }
     check(guess_ears.wait_lost(15000), "five wrong codes close the connection");
 
+    std::cout << "Guessing across connections" << std::endl;
+    {
+        // Opening new connections must not reset the count: wrong codes are
+        // counted per address, and the address is then locked out for a while.
+        ServerOptions locked_options;
+        locked_options.port = 18093;
+        locked_options.room_code = "K7P29Q";
+        locked_options.max_wrong_codes_per_address = 6;
+        locked_options.lockout = std::chrono::seconds(2);
+        Running locked(locked_options);
+
+        Ears a_ears;
+        ChatClient a(a_ears.events_for());
+        a.connect("127.0.0.1", 18093, &err);
+        for (int i = 0; i < 5; ++i) a.request_name("a" + std::to_string(i), "CCCCC" + std::to_string(i));
+        check(a_ears.wait_lost(15000), "the first connection is closed after five wrong codes");
+
+        Ears b_ears;
+        ChatClient b(b_ears.events_for());
+        b.connect("127.0.0.1", 18093, &err);
+        b.request_name("b", "DDDDDD");
+        check(b_ears.wait("failed:Wrong room code", 4000), "a new connection's guess still counts");
+
+        Ears c_ears;
+        ChatClient c(c_ears.events_for());
+        c.connect("127.0.0.1", 18093, &err);
+        c.request_name("c", "K7P29Q");
+        check(c_ears.wait("failed:Too many wrong room codes. Try again later.", 4000),
+              "even the right code is refused while the address is locked out");
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+        Ears d_ears;
+        ChatClient d(d_ears.events_for());
+        d.connect("127.0.0.1", 18093, &err);
+        d.request_name("d", "K7P29Q");
+        check(d_ears.wait("registered:d"), "the lockout ends");
+    }
+
     std::cout << "Open server" << std::endl;
     ServerOptions open_options;
     open_options.port = 18092;

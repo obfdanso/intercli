@@ -3,6 +3,7 @@
 #include "chat_client.h"
 #include "../crypto/crypto_utils.h"
 #include <chrono>
+#include <cstdlib>
 #include <condition_variable>
 #include <iostream>
 #include <mutex>
@@ -186,8 +187,10 @@ private:
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::cout << "Usage: " << argv[0] << " <server_ip> [port] [room_code]" << std::endl;
-        std::cout << "Example: " << argv[0] << " 127.0.0.1 8080 K7P-29Q" << std::endl;
+        std::cout << "Usage: " << argv[0] << " <server_ip> [port]" << std::endl;
+        std::cout << "Example: " << argv[0] << " 127.0.0.1 8080" << std::endl;
+        std::cout << "For a chat with a room code, set INTERCLI_ROOM_CODE first" << std::endl;
+        std::cout << "(not on the command line, where other programs could see it)." << std::endl;
         return 1;
     }
 
@@ -202,7 +205,8 @@ int main(int argc, char* argv[]) {
     try {
         // Inside the try: std::stoi throws on a non-numeric port.
         const uint16_t port = (argc > 2) ? static_cast<uint16_t>(std::stoi(argv[2])) : SecureComm::DEFAULT_PORT;
-        TerminalClient client(argc > 3 ? argv[3] : "");
+        const char* room_code = std::getenv("INTERCLI_ROOM_CODE");
+        TerminalClient client(room_code ? room_code : "");
 
         if (!client.connect(server_ip, port)) {
             std::cerr << "Failed to connect to server" << std::endl;
