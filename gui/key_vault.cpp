@@ -46,35 +46,47 @@ QByteArray unprotect(const QByteArray& wrapped) { return wrapped; }
 
 } // namespace
 
-QByteArray loadOrCreateHistoryKey(const QString& keyFilePath) {
+namespace {
+
+// Reads and unwraps an existing key file. Empty if it can't be used.
+QByteArray readKey(const QString& keyFilePath) {
     QFile file(keyFilePath);
-    if (file.open(QIODevice::ReadOnly)) {
-        const QByteArray key = unprotect(file.readAll());
-        file.close();
-        if (key.size() == kKeySize) {
-            return key;
-        }
-        // Unreadable (another Windows user, or damaged): start a new key. Rows
-        // saved under the old one can no longer be read and are skipped.
+    if (!file.open(QIODevice::ReadOnly)) {
+        return {};
+    }
+    const QByteArray key = unprotect(file.readAll());
+    return key.size() == kKeySize ? key : QByteArray();
+}
+
+} // namespace
+
+QByteArray loadOrCreateHistoryKey(const QString& keyFilePath) {
+    // An existing key is never replaced, even if it can't be read right now
+    // (another Windows user, a damaged file): everything saved under it would
+    // be lost. The caller switches saving off instead.
+    if (QFileInfo::exists(keyFilePath)) {
+        return readKey(keyFilePath);
     }
 
     SecureComm::CryptoManager crypto;
     const std::vector<uint8_t> raw = crypto.generate_random_bytes(kKeySize);
     const QByteArray key(reinterpret_cast<const char*>(raw.data()), static_cast<qsizetype>(raw.size()));
-
-    QDir().mkpath(QFileInfo(keyFilePath).absolutePath());
     const QByteArray stored = protect(key);
     if (stored.isEmpty()) {
-        return key;  // could not wrap it; use it for this run without saving
+        return {};  // a key that can't be kept would lose this session's history
     }
-    // Create the file fresh with owner-only permissions from the start (NewOnly
-    // also refuses to follow a planted link), so the key is never readable by others.
-    QFile::remove(keyFilePath);
-    if (file.open(QIODevice::WriteOnly | QIODevice::NewOnly, QFileDevice::ReadOwner | QFileDevice::WriteOwner)) {
-        if (file.write(stored) != stored.size()) {
-            file.close();
-            QFile::remove(keyFilePath);
-        }
+
+    QDir().mkpath(QFileInfo(keyFilePath).absolutePath());
+    // Owner-only from the moment it exists; NewOnly also refuses a planted link
+    // and loses cleanly to another instance creating the file at the same time.
+    QFile file(keyFilePath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::NewOnly, QFileDevice::ReadOwner | QFileDevice::WriteOwner)) {
+        return readKey(keyFilePath);  // someone else just created it: use theirs
+    }
+    if (file.write(stored) != stored.size() || !file.flush()) {
+        file.close();
+        QFile::remove(keyFilePath);
+        return {};
     }
     return key;
 }

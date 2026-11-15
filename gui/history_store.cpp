@@ -42,6 +42,10 @@ HistoryStore::~HistoryStore() {
 }
 
 bool HistoryStore::open(QString* error) {
+    if (key_.size() != 32) {
+        if (error) *error = QStringLiteral("No usable key for saved messages");
+        return false;
+    }
     QDir().mkpath(QFileInfo(path_).absolutePath());
     QSqlDatabase db = QSqlDatabase::contains(connection_) ? QSqlDatabase::database(connection_, false)
                                                           : QSqlDatabase::addDatabase("QSQLITE", connection_);
@@ -53,6 +57,8 @@ bool HistoryStore::open(QString* error) {
     QSqlQuery q(db);
     const char* statements[] = {
         "PRAGMA journal_mode=WAL",
+        // Deleted rows are overwritten, so names and times don't linger in free pages.
+        "PRAGMA secure_delete=ON",
         "CREATE TABLE IF NOT EXISTS choices (identity TEXT PRIMARY KEY, choice INTEGER NOT NULL)",
         "CREATE TABLE IF NOT EXISTS messages ("
         " id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -197,6 +203,9 @@ void HistoryStore::deleteAll(const QString& identity) {
     q.prepare("DELETE FROM messages WHERE identity = ?");
     q.addBindValue(identity);
     q.exec();
+    // Copy the deletion into the database file and empty the write-ahead log,
+    // which would otherwise still hold the old rows.
+    q.exec("PRAGMA wal_checkpoint(TRUNCATE)");
 }
 
 int HistoryStore::totalMessageRowsForTest() const {

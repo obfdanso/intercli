@@ -8,7 +8,8 @@ namespace Intercli {
 // The 32-byte key that encrypts saved message text. Created on first use and
 // stored in keyFilePath. On Windows the stored copy is wrapped with DPAPI, so it
 // only unwraps for the same Windows user; elsewhere it is stored as-is with
-// owner-only permissions.
+// owner-only permissions. Returns an empty array when no usable key can be had
+// (an existing file that won't unwrap is left untouched); saving is then off.
 QByteArray loadOrCreateHistoryKey(const QString& keyFilePath);
 
 } // namespace Intercli

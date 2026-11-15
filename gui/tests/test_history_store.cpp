@@ -162,6 +162,38 @@ private slots:
         }
     }
 
+    void damaged_key_file_is_left_alone() {
+        // An unreadable key must never be silently replaced: everything saved
+        // under it would be lost. Saving is switched off instead.
+        QTemporaryDir d;
+        const QString path = d.filePath("history.key");
+        {
+            QFile f(path);
+            QVERIFY(f.open(QIODevice::WriteOnly));
+            f.write("not a wrapped key");
+        }
+        QVERIFY(loadOrCreateHistoryKey(path).isEmpty());
+        QCOMPARE(fileBytes(path), QByteArray("not a wrapped key"));
+    }
+
+    void delete_leaves_no_names_in_the_file() {
+        QTemporaryDir d;
+        const QString path = d.filePath("h.db");
+        {
+            HistoryStore s(path, key, "c10");
+            QString err;
+            QVERIFY(s.open(&err));
+            s.setChoice(kBob, HistoryChoice::Save);
+            StoredMessage m = msg("zebrapartner", "x");
+            m.sender = QStringLiteral("zebrasender");
+            s.append(kBob, m);
+            s.deleteAll(kBob);
+        }
+        const QByteArray all = fileBytes(path) + fileBytes(path + "-wal");
+        QVERIFY(!all.contains("zebrapartner"));
+        QVERIFY(!all.contains("zebrasender"));
+    }
+
     void key_file_is_stable_and_wrapped() {
         QTemporaryDir d;
         const QString path = d.filePath("history.key");
