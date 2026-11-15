@@ -166,6 +166,10 @@ Rectangle {
                     Row2 {
                         label: "Next rotation"
                         value: "in " + Chat.session.messagesUntilRotation + " messages"
+                    }
+                    Row2 {
+                        label: "Server key rotations"
+                        value: String(Chat.session.receiveRotations)
                         last: true
                     }
                 }
