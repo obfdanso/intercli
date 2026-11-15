@@ -8,6 +8,7 @@ Item {
     id: root
     readonly property bool everyone: Chat.currentConversation === ""
     readonly property string peer: Chat.currentConversation
+    signal signOutRequested()
 
     Settings {
         id: prefs
@@ -32,6 +33,7 @@ Item {
         Behavior on width { NumberAnimation { duration: Theme.animNormal; easing.type: Easing.OutCubic } }
 
         DetailsPanel {
+            onSignOutRequested: root.signOutRequested()
             anchors.top: parent.top
             anchors.bottom: parent.bottom
             anchors.left: parent.left

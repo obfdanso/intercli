@@ -30,10 +30,34 @@ ApplicationWindow {
         Behavior on opacity { NumberAnimation { duration: Theme.animNormal; easing.type: Easing.OutCubic } }
     }
 
+    // Signing out or closing while hosting with others in the chat ends it for
+    // them too, so ask first.
+    property bool closeAfterEnding: false
+    function requestSignOut() {
+        if (Chat.needsEndChatConfirm()) {
+            endChatSheet.open()
+        } else {
+            Chat.endChat()
+        }
+    }
+    onClosing: (close) => {
+        if (!window.closeAfterEnding && Chat.needsEndChatConfirm()) {
+            close.accepted = false
+            window.closeAfterEnding = true
+            endChatSheet.open()
+        }
+    }
+
     Loader {
+        id: chatLoader
         anchors.fill: parent
         active: window.signedIn
         source: "ChatView.qml"
+        Connections {
+            target: chatLoader.item
+            ignoreUnknownSignals: true
+            function onSignOutRequested() { window.requestSignOut() }
+        }
         opacity: window.signedIn ? 1 : 0
         Behavior on opacity { NumberAnimation { duration: Theme.animNormal; easing.type: Easing.OutCubic } }
     }
@@ -41,6 +65,22 @@ ApplicationWindow {
     SaveHistorySheet {
         anchors.fill: parent
         z: 50
+    }
+
+    ConfirmSheet {
+        id: endChatSheet
+        anchors.fill: parent
+        z: 60
+        title: "End your chat?"
+        message: (Chat.peopleInChat - 1) === 1 ? "1 person will be disconnected."
+                 : (Chat.peopleInChat - 1) + " people will be disconnected."
+        confirmText: "End Chat"
+        onConfirmed: {
+            Chat.endChat()
+            if (window.closeAfterEnding)
+                window.close()
+        }
+        onCancelled: window.closeAfterEnding = false
     }
 
     TitleBar {

@@ -62,6 +62,8 @@ qt_add_qml_module(intercli_gui
         qml/DisconnectedBanner.qml
         qml/SaveHistorySheet.qml
         qml/Toggle.qml
+        qml/NearbyChatRow.qml
+        qml/ConfirmSheet.qml
     RESOURCES
         fonts/InterVariable.ttf
 )

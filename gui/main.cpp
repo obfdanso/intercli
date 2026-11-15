@@ -25,6 +25,12 @@ int main(int argc, char* argv[]) {
     QGuiApplication app(argc, argv);
     QGuiApplication::setApplicationName("intercli");
     QGuiApplication::setOrganizationName("intercli");
+    // A separate profile (own settings, saved messages and host identity) for
+    // running two copies on one PC, e.g. to try hosting and joining.
+    const QString profile = qEnvironmentVariable("INTERCLI_PROFILE");
+    if (!profile.isEmpty()) {
+        QGuiApplication::setOrganizationName(QStringLiteral("intercli-") + profile);
+    }
 
     // Native text rendering keeps small UI text crisp on Windows.
     QQuickWindow::setTextRenderType(QQuickWindow::NativeTextRendering);
