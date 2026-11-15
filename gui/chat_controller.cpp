@@ -339,6 +339,9 @@ void ChatController::onDisconnected(const QString& reason) {
         Q_UNUSED(reason);
         disconnect_reason_ = QStringLiteral("Disconnected from server");
         needs_sign_in_ = false;
+        // Nobody can be known to be online while we are cut off; the roster
+        // comes back after reconnecting.
+        list_->setRoster({}, my_name_);
         setState(Disconnected);
         emit stateChanged();
         emit onlineCountChanged();

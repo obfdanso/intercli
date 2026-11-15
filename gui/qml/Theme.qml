@@ -6,6 +6,7 @@ import QtQuick
 QtObject {
     readonly property color window: "#1C1C1E"
     readonly property color sidebar: "#26262A"
+    readonly property color panel: "#19191B"
     readonly property color raised: "#2C2C2E"
     readonly property color raised2: "#3A3A3C"
     readonly property color separator: Qt.rgba(1, 1, 1, 0.08)

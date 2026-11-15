@@ -30,6 +30,14 @@ Item {
         width: prefs.detailsOpen ? Theme.detailsWidth : 0
         clip: true
         Behavior on width { NumberAnimation { duration: Theme.animNormal; easing.type: Easing.OutCubic } }
+
+        DetailsPanel {
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            anchors.left: parent.left
+            width: Theme.detailsWidth
+            visible: parent.width > 0
+        }
     }
 
     Rectangle {
@@ -108,9 +116,16 @@ Item {
             }
         }
 
+        DisconnectedBanner {
+            id: banner
+            anchors.top: header.bottom
+            anchors.left: parent.left
+            anchors.right: parent.right
+        }
+
         MessageList {
             id: messages
-            anchors.top: header.bottom
+            anchors.top: banner.bottom
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.bottom: composer.top

@@ -101,6 +101,12 @@ int main(int argc, char* argv[]) {
     auto* window = qobject_cast<QQuickWindow*>(engine.rootObjects().constFirst());
     frame.attach(window);
     restoreGeometry(window);
+    // Flash the taskbar button when a message arrives while the app is in the background.
+    QObject::connect(&chat, &Intercli::ChatController::messageArrived, window, [window] {
+        if (!window->isActive()) {
+            window->alert(0);
+        }
+    });
     // Saved while the native window still exists.
     QObject::connect(window, &QQuickWindow::closing, window, [window] { saveGeometry(window); });
 

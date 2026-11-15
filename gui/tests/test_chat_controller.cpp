@@ -103,6 +103,7 @@ private slots:
         QCOMPARE(bob->state(), ChatController::Connecting);
         QTRY_COMPARE_WITH_TIMEOUT(bob->state(), ChatController::Online, kWait);
         QCOMPARE(bob->myName(), QStringLiteral("bob"));
+        QTRY_COMPARE_WITH_TIMEOUT(bob->onlineCount(), 1, kWait);
         QTRY_VERIFY_WITH_TIMEOUT(bob->onlineNames().contains("alice"), kWait);
         QVERIFY(!bob->onlineNames().contains("bob"));
         QCOMPARE(bob->onlineCount(), 1);
@@ -196,6 +197,8 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(bob->state(), ChatController::Disconnected, kWait);
         QVERIFY(!bob->disconnectReason().isEmpty());
         QVERIFY(!bob->send("while offline"));
+        // Nobody can be known to be online while we are cut off.
+        QCOMPARE(bob->onlineCount(), 0);
 
         bob->reconnect();
         QTRY_COMPARE_WITH_TIMEOUT(bob->state(), ChatController::Online, kWait);
