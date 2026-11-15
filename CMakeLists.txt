@@ -28,18 +28,26 @@ target_link_libraries(crypto_lib
     Threads::Threads
 )
 
-# Add server executable
-add_executable(server
-    server/server.cpp
+# Chat server library shared by server.exe and the desktop app (hosting)
+add_library(intercli_server_core STATIC
+    server/core/secure_server.cpp
 )
-
-target_include_directories(server PRIVATE include)
-target_link_libraries(server
+target_include_directories(intercli_server_core PUBLIC include server/core)
+target_link_libraries(intercli_server_core PUBLIC
     crypto_lib
     OpenSSL::SSL
     OpenSSL::Crypto
     Threads::Threads
 )
+if(WIN32)
+    target_link_libraries(intercli_server_core PUBLIC ws2_32)
+endif()
+
+# Add server executable
+add_executable(server
+    server/server.cpp
+)
+target_link_libraries(server intercli_server_core)
 
 # Client protocol library shared by the terminal client and the desktop app
 add_library(intercli_client_core STATIC
@@ -130,6 +138,12 @@ target_include_directories(test_identity PRIVATE include crypto)
 target_link_libraries(test_identity crypto_lib)
 add_test(NAME identity COMMAND test_identity)
 
+add_executable(test_server_core
+    tests/test_server_core.cpp
+)
+target_link_libraries(test_server_core intercli_server_core intercli_client_core)
+add_test(NAME server_core COMMAND test_server_core)
+
 add_executable(test_roster
     tests/test_roster.cpp
 )
@@ -161,16 +175,17 @@ if(MSVC)
     target_compile_options(client PRIVATE /W4)
     target_compile_options(crypto_lib PRIVATE /W4)
     target_compile_options(intercli_client_core PRIVATE /W4)
+    target_compile_options(intercli_server_core PRIVATE /W4)
 else()
     target_compile_options(server PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(client PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(crypto_lib PRIVATE -Wall -Wextra -Wpedantic)
     target_compile_options(intercli_client_core PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(intercli_server_core PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 if(WIN32)
     # Windows socket library, needed by MSVC and MinGW alike
-    target_link_libraries(server ws2_32)
 
     # Copy the OpenSSL runtime DLLs next to each program, so they run (and ctest
     # passes) on a machine where OpenSSL's bin folder is not on PATH.
@@ -179,7 +194,7 @@ if(WIN32)
         "${OPENSSL_INSTALL_DIR}/bin/libcrypto*.dll"
         "${OPENSSL_INSTALL_DIR}/bin/libssl*.dll")
     if(OPENSSL_RUNTIME_DLLS)
-        foreach(exe server client test_dh test_aes_gcm test_chat_envelope test_directional_keys test_roster test_chat_client test_identity)
+        foreach(exe server client test_dh test_aes_gcm test_chat_envelope test_directional_keys test_roster test_chat_client test_identity test_server_core)
             add_custom_command(TARGET ${exe} POST_BUILD
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different ${OPENSSL_RUNTIME_DLLS} $<TARGET_FILE_DIR:${exe}>)
         endforeach()
