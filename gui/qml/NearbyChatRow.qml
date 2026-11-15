@@ -9,13 +9,16 @@ Item {
     required property string hostName
     required property int people
     property bool selected: false
+    property bool keyboardFocus: false
     signal picked()
 
     width: ListView.view ? ListView.view.width : 0
     height: 52
 
     Accessible.role: Accessible.Button
-    Accessible.name: chatName
+    Accessible.name: chatName + ", " + (people === 1 ? "1 person" : people + " people")
+    Accessible.selected: selected
+    Accessible.selectable: true
     Accessible.onPressAction: row.picked()
 
     Rectangle {
@@ -24,8 +27,8 @@ Item {
         anchors.bottomMargin: 2
         radius: 10
         color: row.selected ? Qt.rgba(10 / 255, 132 / 255, 1, 0.18) : mouse.containsMouse ? Theme.hover : "transparent"
-        border.width: row.selected ? 1 : 0
-        border.color: Theme.accent
+        border.width: row.selected || row.keyboardFocus ? 1 : 0
+        border.color: row.keyboardFocus && !row.selected ? Qt.rgba(1, 1, 1, 0.6) : Theme.accent
         Behavior on color { ColorAnimation { duration: Theme.animFast } }
 
         Avatar {

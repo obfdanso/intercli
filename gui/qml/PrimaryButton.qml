@@ -9,6 +9,9 @@ Button {
 
     implicitHeight: 36
     hoverEnabled: true
+    focusPolicy: Qt.StrongFocus
+    Keys.onReturnPressed: if (enabled) clicked()
+    Keys.onEnterPressed: if (enabled) clicked()
 
     contentItem: Item {
         implicitWidth: row.implicitWidth
@@ -36,6 +39,8 @@ Button {
 
     background: Rectangle {
         radius: 8
+        border.width: button.visualFocus ? 2 : 0
+        border.color: "white"
         color: !button.enabled && !button.busy ? Qt.rgba(10 / 255, 132 / 255, 1, 0.35)
              : button.down ? Qt.darker(Theme.accent, 1.15)
              : button.hovered ? Qt.lighter(Theme.accent, 1.08) : Theme.accent

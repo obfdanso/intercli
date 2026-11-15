@@ -10,8 +10,16 @@ Item {
     signal confirmed()
     signal cancelled()
 
-    function open() { shown = true }
+    function open() { shown = true; keys.forceActiveFocus() }
     property bool shown: false
+
+    Item {
+        id: keys
+        focus: root.shown
+        Keys.onEscapePressed: { root.shown = false; root.cancelled() }
+        Keys.onReturnPressed: { root.shown = false; root.confirmed() }
+        Keys.onEnterPressed: { root.shown = false; root.confirmed() }
+    }
 
     visible: opacity > 0
     opacity: shown ? 1 : 0

@@ -12,12 +12,19 @@ Item {
     readonly property bool nameOk: Chat.isValidName(nameField.text)
     property string selectedChat: ""
     property bool byAddress: false
+    property string hint: ""
     readonly property bool portOk: /^\d+$/.test(portField.text) && Number(portField.text) >= 1
                                    && Number(portField.text) <= 65535
 
     function join() {
         if (connecting || !nameOk)
             return
+        hint = ""
+        if (!byAddress && selectedChat.length === 0) {
+            hint = nearbyList.count > 0 ? "Pick a chat below (arrow keys and Enter), or host your own."
+                                        : "No chats found yet. Host your own, or join by address."
+            return
+        }
         if (byAddress) {
             if (portOk && hostField.text.trim().length > 0)
                 Chat.signIn(hostField.text, Number(portField.text), nameField.text, addressCodeField.text)
@@ -105,7 +112,7 @@ Item {
                 }
                 ErrorText {
                     text: Chat.nameError.length > 0 ? Chat.nameError
-                        : (nameField.text.length > 0 && !root.nameOk) ? "1-31 characters, no spaces" : ""
+                        : (nameField.text.length > 0 && !root.nameOk) ? "1-31 characters, no spaces" : root.hint
                     color: Chat.nameError.length > 0 ? Theme.danger : Theme.textTertiary
                 }
 
@@ -129,10 +136,18 @@ Item {
                             anchors.margins: 4
                             clip: true
                             model: Chat.nearby
+                            activeFocusOnTab: true
+                            keyNavigationEnabled: true
+                            Accessible.role: Accessible.List
+                            Accessible.name: "Chats nearby"
                             delegate: NearbyChatRow {
                                 selected: root.selectedChat === chatId
+                                keyboardFocus: nearbyList.activeFocus && ListView.isCurrentItem
                                 onPicked: root.pick(chatId)
                             }
+                            Keys.onReturnPressed: if (currentItem) root.pick(currentItem.chatId)
+                            Keys.onEnterPressed: if (currentItem) root.pick(currentItem.chatId)
+                            Keys.onSpacePressed: if (currentItem) root.pick(currentItem.chatId)
                         }
                         Column {
                             visible: nearbyList.count === 0
@@ -305,12 +320,17 @@ Item {
                 }
 
                 Text {
+                    id: addressLink
                     textFormat: Text.PlainText
                     Layout.topMargin: 14
                     Layout.alignment: Qt.AlignHCenter
                     text: root.byAddress ? "Back to chats nearby" : "Join by address"
                     color: Theme.accent
                     font.pixelSize: 12
+                    font.underline: activeFocus
+                    activeFocusOnTab: true
+                    Keys.onReturnPressed: { root.byAddress = !root.byAddress; Chat.clearErrors() }
+                    Keys.onSpacePressed: { root.byAddress = !root.byAddress; Chat.clearErrors() }
                     Accessible.role: Accessible.Link
                     Accessible.name: text
                     Accessible.onPressAction: { root.byAddress = !root.byAddress; Chat.clearErrors() }
