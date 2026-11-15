@@ -13,6 +13,10 @@ namespace {
 const QByteArray kQuery = QByteArrayLiteral("INTERCLI?2");
 const QByteArray kReply = QByteArrayLiteral("INTERCLI!2");
 constexpr int kMaxDatagram = 1024;
+constexpr int kQuerySize = 256;          // queries are at least this big
+constexpr int kMaxRows = 64;             // the whole "Chats nearby" list
+constexpr int kMaxRowsPerAddress = 4;    // chats one address can list
+constexpr qint64 kReplyIntervalMs = 500; // at most one answer per sender per interval
 
 // Everything in a reply comes from whoever sent it, so it is checked before use.
 std::optional<ChatAnnouncement> parseReply(const QByteArray& datagram) {
@@ -87,9 +91,20 @@ void ChatBeacon::answer() {
         QHostAddress from;
         quint16 fromPort = 0;
         socket_->readDatagram(datagram.data(), datagram.size(), &from, &fromPort);
-        if (datagram != kQuery || announcement_.chatId.isEmpty()) {
+        if (datagram.size() < kQuerySize || !datagram.startsWith(kQuery) || announcement_.chatId.isEmpty() ||
+            !onLocalNetwork(from)) {
             continue;
         }
+        // One answer per sender per half second, however fast it asks.
+        const QString sender = from.toString() + QLatin1Char(':') + QString::number(fromPort);
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        if (now - last_reply_ms_.value(sender, 0) < kReplyIntervalMs) {
+            continue;
+        }
+        if (last_reply_ms_.size() > 1024) {
+            last_reply_ms_.clear();
+        }
+        last_reply_ms_.insert(sender, now);
         QJsonObject o;
         o["id"] = announcement_.chatId;
         o["name"] = announcement_.chatName;
@@ -101,7 +116,33 @@ void ChatBeacon::answer() {
     }
 }
 
+// Only machines on a network this PC is directly on (or this PC itself) get
+// an answer; anything routed from further away is ignored.
+bool ChatBeacon::onLocalNetwork(const QHostAddress& from) const {
+    bool ok = false;
+    const QHostAddress v4(from.toIPv4Address(&ok));
+    const QHostAddress sender = ok ? v4 : from;
+    if (sender.isLoopback()) {
+        return true;
+    }
+    for (const QNetworkInterface& iface : QNetworkInterface::allInterfaces()) {
+        for (const QNetworkAddressEntry& entry : iface.addressEntries()) {
+            if (entry.ip().protocol() == QAbstractSocket::IPv4Protocol &&
+                sender.isInSubnet(entry.ip(), entry.prefixLength())) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 // --- ChatFinder --------------------------------------------------------------
+
+QByteArray ChatFinder::queryDatagram() {
+    QByteArray q = kQuery;
+    q.append(QByteArray(kQuerySize - q.size(), '\0'));
+    return q;
+}
 
 ChatFinder::ChatFinder(QObject* parent) : QAbstractListModel(parent) {
     query_timer_.setInterval(2000);
@@ -163,8 +204,9 @@ void ChatFinder::query() {
             }
         }
     }
+    const QByteArray q = queryDatagram();
     for (const QHostAddress& target : targets) {
-        socket_->writeDatagram(kQuery, target, port_);
+        socket_->writeDatagram(q, target, port_);
     }
 }
 
@@ -197,14 +239,27 @@ void ChatFinder::handleReply(const QByteArray& datagram, const QHostAddress& fro
     const quint32 v4 = from.toIPv4Address(&ok);
     a->address = ok ? QHostAddress(v4) : from;
 
+    int fromSameAddress = 0;
     for (int r = 0; r < rows_.size(); ++r) {
         if (rows_[r].chat.chatId == a->chatId) {
-            // The same chat heard through another network keeps one row.
+            // A listed chat keeps the address it was first heard from, so a
+            // reply from somewhere else can't redirect it. (Joining still
+            // checks the host's identity key.) The same chat heard through
+            // another of this PC's networks stays one row.
+            if (rows_[r].chat.address != a->address) {
+                return;
+            }
             rows_[r].chat = *a;
             rows_[r].lastSeen = QDateTime::currentDateTimeUtc();
             emit dataChanged(index(r), index(r));
             return;
         }
+        if (rows_[r].chat.address == a->address) {
+            ++fromSameAddress;
+        }
+    }
+    if (rows_.size() >= kMaxRows || fromSameAddress >= kMaxRowsPerAddress) {
+        return;
     }
     const int row = static_cast<int>(rows_.size());
     beginInsertRows(QModelIndex(), row, row);

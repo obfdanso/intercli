@@ -43,7 +43,7 @@ private slots:
 
         QUdpSocket asker;
         QVERIFY(asker.bind(QHostAddress::LocalHost, 0));
-        asker.writeDatagram(QByteArray("INTERCLI?2"), QHostAddress::LocalHost, kPort);
+        asker.writeDatagram(ChatFinder::queryDatagram(), QHostAddress::LocalHost, kPort);
         QTRY_VERIFY(asker.hasPendingDatagrams());
         QByteArray reply(int(asker.pendingDatagramSize()), 0);
         asker.readDatagram(reply.data(), reply.size());
@@ -92,6 +92,73 @@ private slots:
         finder.injectReplyForTests(reply, QHostAddress(QStringLiteral("10.0.0.5")));
         QCOMPARE(finder.rowCount(), 1);
         QCOMPARE(rowOf(finder, QStringLiteral("chat-9")), 0);
+    }
+
+    // A reply must never be much bigger than the question, or the beacon could
+    // be used to flood someone with traffic they never asked for.
+    void short_queries_get_no_reply() {
+        ChatBeacon beacon;
+        QVERIFY(beacon.start(kPort));
+        beacon.setAnnouncement(announcement());
+        QUdpSocket asker;
+        QVERIFY(asker.bind(QHostAddress::LocalHost, 0));
+        asker.writeDatagram(QByteArray("INTERCLI?2"), QHostAddress::LocalHost, kPort);
+        QTest::qWait(500);
+        QVERIFY(!asker.hasPendingDatagrams());
+        QVERIFY(ChatFinder::queryDatagram().size() >= 256);
+    }
+
+    void replies_are_rate_limited_per_sender() {
+        ChatBeacon beacon;
+        QVERIFY(beacon.start(kPort));
+        beacon.setAnnouncement(announcement());
+        QUdpSocket asker;
+        QVERIFY(asker.bind(QHostAddress::LocalHost, 0));
+        for (int i = 0; i < 10; ++i) {
+            asker.writeDatagram(ChatFinder::queryDatagram(), QHostAddress::LocalHost, kPort);
+        }
+        QTest::qWait(500);
+        int replies = 0;
+        while (asker.hasPendingDatagrams()) {
+            QByteArray d(int(asker.pendingDatagramSize()), 0);
+            asker.readDatagram(d.data(), d.size());
+            ++replies;
+        }
+        QVERIFY2(replies <= 2, qPrintable(QString("got %1 replies to a burst of 10").arg(replies)));
+        QVERIFY(replies >= 1);
+    }
+
+    // Someone else claiming an already listed chat can't move it to their address.
+    void a_listed_chat_keeps_its_first_address() {
+        ChatFinder finder;
+        finder.setTimingForTests(200, 5000);
+        finder.start(kPort);
+        const QByteArray reply = QByteArray("INTERCLI!2") +
+            "{\"id\":\"chat-5\",\"name\":\"Ama chat\",\"host\":\"Ama\",\"port\":8080,\"people\":2,\"code\":\"1\"}";
+        finder.injectReplyForTests(reply, QHostAddress(QStringLiteral("192.168.1.20")));
+        finder.injectReplyForTests(reply, QHostAddress(QStringLiteral("192.168.1.66")));
+        QCOMPARE(finder.rowCount(), 1);
+        QCOMPARE(finder.find(QStringLiteral("chat-5"))->address, QHostAddress(QStringLiteral("192.168.1.20")));
+    }
+
+    void the_list_is_bounded() {
+        ChatFinder finder;
+        finder.setTimingForTests(200, 60000);
+        finder.start(kPort);
+        // One address can list only a few chats.
+        for (int i = 0; i < 20; ++i) {
+            const QByteArray r = QByteArray("INTERCLI!2") + "{\"id\":\"one-" + QByteArray::number(i) +
+                "\",\"name\":\"x\",\"host\":\"x\",\"port\":8080,\"people\":1,\"code\":\"1\"}";
+            finder.injectReplyForTests(r, QHostAddress(QStringLiteral("10.1.1.1")));
+        }
+        QCOMPARE(finder.rowCount(), 4);
+        // And the whole list has a ceiling.
+        for (int i = 0; i < 200; ++i) {
+            const QByteArray r = QByteArray("INTERCLI!2") + "{\"id\":\"many-" + QByteArray::number(i) +
+                "\",\"name\":\"x\",\"host\":\"x\",\"port\":8080,\"people\":1,\"code\":\"1\"}";
+            finder.injectReplyForTests(r, QHostAddress(QStringLiteral("10.2.%1.%2").arg(i / 200).arg(i % 200 + 1)));
+        }
+        QCOMPARE(finder.rowCount(), 64);
     }
 
     void garbage_is_ignored() {

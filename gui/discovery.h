@@ -9,6 +9,7 @@
 
 #include <QAbstractListModel>
 #include <QDateTime>
+#include <QHash>
 #include <QHostAddress>
 #include <QObject>
 #include <QTimer>
@@ -46,9 +47,11 @@ public:
 
 private:
     void answer();
+    bool onLocalNetwork(const QHostAddress& from) const;
 
     QUdpSocket* socket_ = nullptr;
     ChatAnnouncement announcement_;
+    QHash<QString, qint64> last_reply_ms_;  // per sender, for rate limiting
 };
 
 // Joiner side: the "Chats nearby" list.
@@ -79,6 +82,10 @@ public:
     void stop();
     bool running() const;
     std::optional<ChatAnnouncement> find(const QString& chatId) const;
+
+    // The question a finder sends. Padded so it is bigger than any answer: a
+    // beacon can't be used to bounce more traffic at someone than was sent.
+    static QByteArray queryDatagram();
 
     void setTimingForTests(int queryMs, int expiryMs);
     // Feeds a reply as if it had arrived from `from`.
