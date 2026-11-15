@@ -20,15 +20,19 @@ Item {
 
     Rectangle {
         id: card
+        // In the small sign-in window the form is the whole window (no card
+        // drawn inside it); the card look is kept for a large window.
+        readonly property bool plain: root.width < 600
         anchors.centerIn: parent
+        anchors.verticalCenterOffset: plain ? Theme.titleBarHeight / 2 : 0
         width: 360
         height: column.implicitHeight + 64
         radius: 14
-        color: Theme.raised
-        border.color: Qt.rgba(1, 1, 1, 0.06)
+        color: plain ? "transparent" : Theme.raised
+        border.color: plain ? "transparent" : Qt.rgba(1, 1, 1, 0.06)
 
         // Soft shadow under the card.
-        layer.enabled: true
+        layer.enabled: !plain
         layer.effect: MultiEffect {
             shadowEnabled: true
             shadowColor: "black"

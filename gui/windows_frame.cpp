@@ -2,6 +2,8 @@
 
 #include <QGuiApplication>
 #include <QQuickWindow>
+#include <QScreen>
+#include <QSettings>
 #include <QTimer>
 
 #ifdef Q_OS_WIN
@@ -96,9 +98,18 @@ void WindowsFrame::minimize() {
 }
 
 void WindowsFrame::toggleMaximize() {
-    if (!window_) {
+    if (!window_ || !resizable_) {
         return;
     }
+#ifdef Q_OS_WIN
+    // A real Windows maximise, the same as double-clicking the title or Win+Up.
+    // Qt's own maximise of a frameless window only resizes it to the work area,
+    // which Windows doesn't treat as maximised (no restore size, no snap).
+    if (HWND hwnd = reinterpret_cast<HWND>(hwnd_)) {
+        ShowWindow(hwnd, IsZoomed(hwnd) ? SW_RESTORE : SW_MAXIMIZE);
+        return;
+    }
+#endif
     if (maximized_) {
         window_->showNormal();
     } else {
@@ -134,6 +145,124 @@ void WindowsFrame::fixRestoreRect() {
 #endif
 }
 
+void WindowsFrame::setMaximizeAllowed(bool allowed) {
+#ifdef Q_OS_WIN
+    HWND hwnd = reinterpret_cast<HWND>(hwnd_);
+    if (!hwnd) {
+        return;
+    }
+    // Without the maximise style, double-clicking the title and Win+Up cannot
+    // maximise the window either.
+    LONG_PTR style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+    style = allowed ? (style | WS_MAXIMIZEBOX) : (style & ~WS_MAXIMIZEBOX);
+    SetWindowLongPtrW(hwnd, GWL_STYLE, style);
+    SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+                 SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+#else
+    Q_UNUSED(allowed);
+#endif
+}
+
+void WindowsFrame::enterCompact() {
+    if (!window_) {
+        return;
+    }
+    saveFullPlacement();
+    full_mode_ = false;
+#ifdef Q_OS_WIN
+    // Undo a real Windows maximise the same way it was made.
+    if (HWND hwnd = reinterpret_cast<HWND>(hwnd_); hwnd && IsZoomed(hwnd)) {
+        ShowWindow(hwnd, SW_RESTORE);
+    }
+#endif
+    if (window_->windowStates() & Qt::WindowMaximized) {
+        window_->showNormal();
+    }
+    resizable_ = false;
+    emit resizableChanged();
+    setMaximizeAllowed(false);
+
+    const QSize size = compactSize();
+    window_->setMinimumSize(size);
+    window_->setMaximumSize(size);
+    window_->resize(size);
+    if (QScreen* screen = window_->screen()) {
+        const QRect avail = screen->availableGeometry();
+        window_->setPosition(avail.center() - QPoint(size.width() / 2, size.height() / 2));
+    }
+}
+
+void WindowsFrame::enterFull() {
+    if (!window_) {
+        return;
+    }
+    full_mode_ = true;
+    resizable_ = true;
+    emit resizableChanged();
+    window_->setMinimumSize(QSize(820, 520));
+    window_->setMaximumSize(QSize((1 << 24) - 1, (1 << 24) - 1));  // no limit (QWINDOWSIZE_MAX)
+    setMaximizeAllowed(true);
+    restoreFullPlacement();
+}
+
+// Windows remembers the normal (restored) rectangle even while a window is
+// maximised, so the placement API saves both the size and the maximised state.
+void WindowsFrame::saveFullPlacement() {
+    if (!window_ || !full_mode_) {
+        return;
+    }
+    QSettings settings;
+#ifdef Q_OS_WIN
+    WINDOWPLACEMENT wp = {};
+    wp.length = sizeof(wp);
+    if (!hwnd_ || !GetWindowPlacement(reinterpret_cast<HWND>(hwnd_), &wp)) {
+        return;
+    }
+    const RECT& r = wp.rcNormalPosition;
+    settings.setValue("windowGeometry", QRect(QPoint(r.left, r.top), QPoint(r.right - 1, r.bottom - 1)));
+    settings.setValue("windowMaximized", wp.showCmd == SW_SHOWMAXIMIZED);
+#else
+    settings.setValue("windowGeometry", window_->geometry());
+    settings.setValue("windowMaximized", bool(window_->windowStates() & Qt::WindowMaximized));
+#endif
+}
+
+void WindowsFrame::restoreFullPlacement() {
+    QSettings settings;
+    const QRect rect = settings.value("windowGeometry").toRect();
+    const bool maximized = settings.value("windowMaximized", false).toBool();
+#ifdef Q_OS_WIN
+    const RECT r = {rect.left(), rect.top(), rect.right() + 1, rect.bottom() + 1};
+    // Ignore a saved rectangle that is no longer on any monitor.
+    if (rect.isValid() && hwnd_ && MonitorFromRect(&r, MONITOR_DEFAULTTONULL)) {
+        HWND hwnd = reinterpret_cast<HWND>(hwnd_);
+        WINDOWPLACEMENT wp = {};
+        wp.length = sizeof(wp);
+        GetWindowPlacement(hwnd, &wp);
+        wp.rcNormalPosition = r;
+        wp.showCmd = maximized ? SW_SHOWMAXIMIZED : SW_SHOWNORMAL;
+        wp.flags = 0;
+        SetWindowPlacement(hwnd, &wp);
+        return;
+    }
+#else
+    if (rect.isValid() && QGuiApplication::screenAt(rect.center())) {
+        window_->setGeometry(rect);
+        if (maximized) {
+            window_->showMaximized();
+        }
+        return;
+    }
+#endif
+    // First run: a comfortable size in the middle of the screen.
+    const QSize size(1100, 700);
+    window_->resize(size);
+    if (QScreen* screen = window_->screen()) {
+        const QRect avail = screen->availableGeometry();
+        window_->setPosition(avail.center() - QPoint(size.width() / 2, size.height() / 2));
+    }
+}
+
 void WindowsFrame::setMaxState(bool hovered, bool pressed) {
     if (hovered != max_hovered_ || pressed != max_pressed_) {
         max_hovered_ = hovered;
@@ -144,10 +273,12 @@ void WindowsFrame::setMaxState(bool hovered, bool pressed) {
 
 bool WindowsFrame::nativeEventFilter(const QByteArray& eventType, void* message, qintptr* result) {
 #ifdef Q_OS_WIN
-    // Queued messages (every real mouse click) reach the filter twice: first
-    // from the event loop with no result slot, then from the window procedure
-    // with one. Only the second pass may answer them.
-    if (!window_ || !result || eventType != "windows_generic_MSG") {
+    // Qt shows mouse input (every real click) to native filters only from the
+    // event loop, where there is no result slot: result is null and returning
+    // true just stops the message. Other messages come from the window
+    // procedure with a result slot. So: never write through a null result,
+    // and answer messages that need a result only when there is one.
+    if (!window_ || eventType != "windows_generic_MSG") {
         return false;
     }
     MSG* msg = static_cast<MSG*>(message);
@@ -188,7 +319,7 @@ bool WindowsFrame::nativeEventFilter(const QByteArray& eventType, void* message,
             return false;
 
         case WM_NCCALCSIZE: {
-            if (msg->wParam == FALSE) {
+            if (msg->wParam == FALSE || !result) {
                 return false;
             }
             auto* params = reinterpret_cast<NCCALCSIZE_PARAMS*>(msg->lParam);
@@ -205,6 +336,9 @@ bool WindowsFrame::nativeEventFilter(const QByteArray& eventType, void* message,
         }
 
         case WM_NCHITTEST: {
+            if (!result) {
+                return false;
+            }
             POINT pt = {GET_X_LPARAM(msg->lParam), GET_Y_LPARAM(msg->lParam)};
             RECT wr;
             GetWindowRect(hwnd, &wr);
@@ -212,7 +346,7 @@ bool WindowsFrame::nativeEventFilter(const QByteArray& eventType, void* message,
             const qreal ratio = window_->devicePixelRatio();
             const QPointF p(pt.x / ratio, pt.y / ratio);
 
-            if (!IsZoomed(hwnd)) {
+            if (resizable_ && !IsZoomed(hwnd)) {
                 const int w = wr.right - wr.left;
                 const int h = wr.bottom - wr.top;
                 const bool left = pt.x < frame_x;
@@ -228,7 +362,7 @@ bool WindowsFrame::nativeEventFilter(const QByteArray& eventType, void* message,
                 if (top) { *result = HTTOP; return true; }
                 if (bottom) { *result = HTBOTTOM; return true; }
             }
-            if (max_.contains(p)) {
+            if (resizable_ && max_.contains(p)) {
                 // Windows 11 shows its snap-layout flyout only for HTMAXBUTTON.
                 *result = HTMAXBUTTON;
                 return true;
@@ -272,8 +406,12 @@ bool WindowsFrame::nativeEventFilter(const QByteArray& eventType, void* message,
         case WM_NCLBUTTONDBLCLK:
             if (msg->wParam == HTMAXBUTTON) {
                 setMaxState(true, true);
-                *result = 0;
-                return true;  // stop Windows drawing its own legacy button
+                if (result) {
+                    *result = 0;
+                }
+                // Swallowed: otherwise Windows starts its own old-style caption
+                // button handling and waits for the mouse in a modal loop.
+                return true;
             }
             return false;
         case WM_NCLBUTTONUP:
@@ -283,7 +421,9 @@ bool WindowsFrame::nativeEventFilter(const QByteArray& eventType, void* message,
                 if (was_pressed) {
                     toggleMaximize();
                 }
-                *result = 0;
+                if (result) {
+                    *result = 0;
+                }
                 return true;
             }
             return false;

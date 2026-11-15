@@ -12,13 +12,25 @@ Item {
             return
         const b = Theme.titleBarHeight
         const right = width
-        Frame.setCaptionRects(Qt.rect(0, 0, right - 3 * 46, b),
-                              Qt.rect(right - 3 * 46, 0, 46, b),
-                              Qt.rect(right - 2 * 46, 0, 46, b),
-                              Qt.rect(right - 46, 0, 46, b))
+        if (Frame.resizable) {
+            Frame.setCaptionRects(Qt.rect(0, 0, right - 3 * 46, b),
+                                  Qt.rect(right - 3 * 46, 0, 46, b),
+                                  Qt.rect(right - 2 * 46, 0, 46, b),
+                                  Qt.rect(right - 46, 0, 46, b))
+        } else {
+            // The compact sign-in window has no maximise button.
+            Frame.setCaptionRects(Qt.rect(0, 0, right - 2 * 46, b),
+                                  Qt.rect(right - 2 * 46, 0, 46, b),
+                                  Qt.rect(0, 0, 0, 0),
+                                  Qt.rect(right - 46, 0, 46, b))
+        }
     }
     onWidthChanged: reportRects()
     Component.onCompleted: reportRects()
+    Connections {
+        target: Frame
+        function onResizableChanged() { root.reportRects() }
+    }
 
     Row {
         x: 14
@@ -54,6 +66,7 @@ Item {
             onClicked: Frame.minimize()
         }
         CaptionButton {
+            visible: Frame.resizable
             glyph: Frame.maximized ? "" : ""
             externalHover: Frame.maxHovered
             externalPressed: Frame.maxPressed

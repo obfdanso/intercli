@@ -6,14 +6,16 @@ ApplicationWindow {
     id: window
     width: 1100
     height: 700
-    minimumWidth: 820
-    minimumHeight: 520
     visible: true
     title: "intercli"
     color: Theme.window
     flags: Frame.customFrame ? (Qt.Window | Qt.FramelessWindowHint) : Qt.Window
 
     readonly property bool signedIn: Chat.state !== Chat.SignedOut && Chat.state !== Chat.Connecting
+
+    // Small sign-in window first (like joining a meeting); the full window
+    // opens once signed in, and shrinks back on sign out.
+    onSignedInChanged: signedIn ? Frame.enterFull() : Frame.enterCompact()
 
     Binding {
         target: Chat
