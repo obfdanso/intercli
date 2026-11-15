@@ -468,19 +468,25 @@ struct SecureServer::Impl {
         }
         LogLine(this, false) << "Client disconnected";
 
-        // The socket is closed under send_mutex so a relaying thread cannot write
-        // to it mid-close, or to an unrelated connection that reuses the
-        // descriptor afterwards. It is done before taking connections_mutex_, so
-        // stop() (which holds that while cutting connections) never waits on a
-        // relay. Erasing the entry must be the last thing the thread does: once
-        // it is gone, stop() may return and the server may be destroyed.
+        // Order matters here:
+        // 1. shutdown wakes any relay stuck sending to this client (stop() may
+        //    be waiting on it), without freeing the descriptor;
+        // 2. the entry leaves the list, so stop() never touches this socket
+        //    again (it only cuts sockets of connections still listed);
+        // 3. the socket is closed under send_mutex, so a relaying thread cannot
+        //    write to it mid-close, or to a connection that reuses the
+        //    descriptor afterwards. conn stays alive through our shared_ptr.
+        shutdown_socket(conn->socket);
         {
-            std::lock_guard<std::mutex> send_lock(conn->send_mutex);
-            close_socket(conn->socket);
+            std::lock_guard<std::mutex> lock(connections_mutex_);
+            connections_.erase(conn);
+            // stop() may return (and the server go away) once this is seen;
+            // nothing below touches the server.
+            connections_cv_.notify_all();
         }
-        std::lock_guard<std::mutex> lock(connections_mutex_);
-        connections_.erase(conn);
-        connections_cv_.notify_all();
+        std::lock_guard<std::mutex> send_lock(conn->send_mutex);
+        close_socket(conn->socket);
+        conn->socket = -1;
     }
 
     // Sends a header-only error frame on a socket not yet tied to a connection.
