@@ -144,7 +144,10 @@ void WindowsFrame::setMaxState(bool hovered, bool pressed) {
 
 bool WindowsFrame::nativeEventFilter(const QByteArray& eventType, void* message, qintptr* result) {
 #ifdef Q_OS_WIN
-    if (!window_ || eventType != "windows_generic_MSG") {
+    // Queued messages (every real mouse click) reach the filter twice: first
+    // from the event loop with no result slot, then from the window procedure
+    // with one. Only the second pass may answer them.
+    if (!window_ || !result || eventType != "windows_generic_MSG") {
         return false;
     }
     MSG* msg = static_cast<MSG*>(message);

@@ -107,6 +107,7 @@ intercli_add_qt_test(test_conversation_list_model)
 intercli_add_qt_test(test_message_model)
 intercli_add_qt_test(test_chat_controller WITH_SERVER)
 intercli_add_qt_test(test_history_store)
+intercli_add_qt_test(test_windows_frame)
 
 if(WIN32)
     # Copy Qt's DLLs and QML modules next to intercli.exe so it runs without Qt on PATH.
