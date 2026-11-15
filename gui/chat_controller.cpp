@@ -266,6 +266,10 @@ void ChatController::setWindowActive(bool active) {
     }
 }
 
+void ChatController::clearErrors() {
+    setErrors(QString(), QString());
+}
+
 void ChatController::setSearch(const QString& text) {
     filter_->setFilterFixedString(text);
 }

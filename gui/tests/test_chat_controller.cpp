@@ -123,6 +123,8 @@ private slots:
         QVERIFY(!other.nameError().isEmpty());
         QCOMPARE(other.state(), ChatController::SignedOut);
         QCOMPARE(states.count(), 0);
+        other.clearErrors();
+        QVERIFY(other.nameError().isEmpty());
     }
 
     void bad_port_reports_connect_error() {

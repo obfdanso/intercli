@@ -13,17 +13,27 @@ ApplicationWindow {
     color: Theme.window
     flags: Frame.customFrame ? (Qt.Window | Qt.FramelessWindowHint) : Qt.Window
 
+    readonly property bool signedIn: Chat.state !== Chat.SignedOut && Chat.state !== Chat.Connecting
+
     Binding {
         target: Chat
         property: "windowActive"
         value: window.active
     }
 
-    // Placeholder until the views arrive: a sidebar-coloured strip like the mockup.
-    Rectangle {
-        width: Theme.sidebarWidth
-        height: parent.height
-        color: Theme.sidebar
+    SignInView {
+        anchors.fill: parent
+        opacity: window.signedIn ? 0 : 1
+        visible: opacity > 0
+        Behavior on opacity { NumberAnimation { duration: Theme.animNormal; easing.type: Easing.OutCubic } }
+    }
+
+    Loader {
+        anchors.fill: parent
+        active: window.signedIn
+        source: "ChatView.qml"
+        opacity: window.signedIn ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: Theme.animNormal; easing.type: Easing.OutCubic } }
     }
 
     TitleBar {

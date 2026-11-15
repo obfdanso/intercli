@@ -38,6 +38,11 @@ qt_add_qml_module(intercli_gui
         qml/Theme.qml
         qml/TitleBar.qml
         qml/CaptionButton.qml
+        qml/AppTextField.qml
+        qml/Spinner.qml
+        qml/PrimaryButton.qml
+        qml/SignInView.qml
+        qml/ChatView.qml
     RESOURCES
         fonts/InterVariable.ttf
 )

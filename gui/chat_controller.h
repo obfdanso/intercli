@@ -71,6 +71,8 @@ public:
     Q_INVOKABLE void reconnect();
     Q_INVOKABLE void signOut();
     Q_INVOKABLE void setSearch(const QString& text);
+    // Called when the user edits a sign-in field, so a stale error goes away.
+    Q_INVOKABLE void clearErrors();
 
     Q_INVOKABLE static bool isValidName(const QString& name);
     Q_INVOKABLE static int utf8Length(const QString& text);
