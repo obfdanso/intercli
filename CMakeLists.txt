@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.21)
 project(SecureComm)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -9,6 +9,9 @@ find_package(OpenSSL REQUIRED)
 
 # Find Threads
 find_package(Threads REQUIRED)
+
+# Qt 6 is optional: without it everything except the desktop app still builds.
+find_package(Qt6 6.5 COMPONENTS Quick QuickControls2 Sql Test QUIET)
 
 # Include directories
 include_directories(include)
@@ -174,4 +177,11 @@ if(WIN32)
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different ${OPENSSL_RUNTIME_DLLS} $<TARGET_FILE_DIR:${exe}>)
         endforeach()
     endif()
+endif()
+
+# Desktop app, last so it can reuse OPENSSL_RUNTIME_DLLS from above.
+if(Qt6_FOUND)
+    add_subdirectory(gui)
+else()
+    message(STATUS "Qt6 not found: skipping the desktop app")
 endif()

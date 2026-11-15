@@ -31,7 +31,9 @@ secure_comm/
 ├── server/
 │   └── server.cpp         # Secure server implementation
 ├── client/
-│   └── client.cpp         # Secure client implementation
+│   ├── core/              # Client protocol library shared by both clients
+│   └── client.cpp         # Terminal client
+├── gui/                   # Desktop app (Qt Quick), built when Qt 6 is found
 ├── tests/                 # Unit tests and the three-client integration test
 └── README.md              # This file
 ```
@@ -94,6 +96,22 @@ cmake --build build --config Release
 The programs are `build\Release\server.exe` and `build\Release\client.exe`. The OpenSSL
 DLLs are copied next to them during the build, so nothing needs adding to `PATH`.
 
+### Building the desktop app (Windows)
+
+The desktop app needs Qt 6.5 or newer as well. Install Qt 6.10 for MSVC 2022 64-bit
+(the online installer, or `pip install aqtinstall` then
+`python -m aqt install-qt windows desktop 6.10.3 win64_msvc2022_64 -O C:/Qt`) and tell
+CMake where it is:
+
+```bat
+cmake -S . -B build -DOPENSSL_ROOT_DIR="C:/Program Files/OpenSSL-Win64" -DCMAKE_PREFIX_PATH="C:/Qt/6.10.3/msvc2022_64"
+cmake --build build --config Release
+```
+
+The app is `build\Release\intercli.exe`. Qt's DLLs are deployed next to it during the
+build. Without Qt, CMake prints `Qt6 not found: skipping the desktop app` and builds
+everything else.
+
 ### Running the tests
 
 Linux / macOS:
@@ -106,9 +124,10 @@ Windows (Visual Studio builds need the configuration named):
 cd build && ctest -C Release --output-on-failure
 ```
 
-This runs the `dh_key_exchange`, `aes_gcm`, `chat_envelope` and `directional_keys` unit
-tests, plus `chat_integration`, which starts a real server and three clients on port 8080
-(it needs `bash`, such as Git Bash on Windows, and is skipped where bash is not available).
+This runs the `dh_key_exchange`, `aes_gcm`, `chat_envelope`, `directional_keys` and
+`roster` unit tests, plus `chat_integration` and `chat_client`, which start a real server
+on port 8080 and drive clients against it (they need `bash`, such as Git Bash on Windows,
+and are skipped where bash is not available).
 
 ## 🚀 Usage
 
