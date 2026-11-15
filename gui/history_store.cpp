@@ -21,6 +21,17 @@ QString notNull(const QString& s) {
     return s.isNull() ? QStringLiteral("") : s;
 }
 
+// Row format 2 binds a row to its identity and conversation: decrypting it
+// anywhere else fails. Format 1 rows (saved before this) have no binding.
+constexpr int kBoundRows = 2;
+
+QByteArray rowBinding(const QString& identity, const QString& conversation) {
+    QByteArray aad = identity.toUtf8();
+    aad.append('\0');
+    aad.append(notNull(conversation).toUtf8());
+    return aad;
+}
+
 } // namespace
 
 QString identityKey(const QString& host, int port, const QString& name) {
@@ -72,6 +83,17 @@ bool HistoryStore::open(QString* error) {
             return false;
         }
     }
+    // Databases from before rows were bound get the row format column (old rows are format 1).
+    bool hasFormat = false;
+    if (q.exec("PRAGMA table_info(messages)")) {
+        while (q.next()) {
+            hasFormat = hasFormat || q.value(1).toString() == QStringLiteral("v");
+        }
+    }
+    if (!hasFormat && !q.exec("ALTER TABLE messages ADD COLUMN v INTEGER NOT NULL DEFAULT 1")) {
+        if (error) *error = q.lastError().text();
+        return false;
+    }
     open_ = true;
     return true;
 }
@@ -99,18 +121,19 @@ void HistoryStore::setChoice(const QString& identity, HistoryChoice choice) {
     q.exec();
 }
 
-QByteArray HistoryStore::encrypt(const QString& text) const {
+QByteArray HistoryStore::encrypt(const QString& text, const QByteArray& aad) const {
     const QByteArray utf8 = text.toUtf8();
     const std::vector<uint8_t> iv = crypto_->generate_random_bytes(kIvSize);
     const std::vector<uint8_t> key(key_.begin(), key_.end());
     const std::vector<uint8_t> plain(utf8.begin(), utf8.end());
-    const std::vector<uint8_t> sealed = crypto_->encrypt_aes_gcm(plain, key, iv);
+    const std::vector<uint8_t> sealed =
+        crypto_->encrypt_aes_gcm(plain, key, iv, std::vector<uint8_t>(aad.begin(), aad.end()));
     QByteArray blob(reinterpret_cast<const char*>(iv.data()), static_cast<qsizetype>(iv.size()));
     blob.append(reinterpret_cast<const char*>(sealed.data()), static_cast<qsizetype>(sealed.size()));
     return blob;
 }
 
-bool HistoryStore::decrypt(const QByteArray& blob, QString* text) const {
+bool HistoryStore::decrypt(const QByteArray& blob, const QByteArray& aad, QString* text) const {
     if (blob.size() <= kIvSize) {
         return false;
     }
@@ -118,7 +141,8 @@ bool HistoryStore::decrypt(const QByteArray& blob, QString* text) const {
         const std::vector<uint8_t> iv(blob.begin(), blob.begin() + kIvSize);
         const std::vector<uint8_t> sealed(blob.begin() + kIvSize, blob.end());
         const std::vector<uint8_t> key(key_.begin(), key_.end());
-        const std::vector<uint8_t> plain = crypto_->decrypt_aes_gcm(sealed, key, iv);
+        const std::vector<uint8_t> plain =
+            crypto_->decrypt_aes_gcm(sealed, key, iv, std::vector<uint8_t>(aad.begin(), aad.end()));
         *text = QString::fromUtf8(reinterpret_cast<const char*>(plain.data()), static_cast<qsizetype>(plain.size()));
         return true;
     } catch (const std::exception&) {
@@ -131,13 +155,14 @@ qint64 HistoryStore::append(const QString& identity, const StoredMessage& messag
         return 0;
     }
     QSqlQuery q(QSqlDatabase::database(connection_));
-    q.prepare("INSERT INTO messages (identity, conversation, kind, sender, time, blob) VALUES (?, ?, ?, ?, ?, ?)");
+    q.prepare("INSERT INTO messages (identity, conversation, kind, sender, time, blob, v) VALUES (?, ?, ?, ?, ?, ?, ?)");
     q.addBindValue(identity);
     q.addBindValue(notNull(message.conversation));
     q.addBindValue(message.kind);
     q.addBindValue(notNull(message.sender));
     q.addBindValue(message.time.toMSecsSinceEpoch());
-    q.addBindValue(encrypt(message.text));
+    q.addBindValue(encrypt(message.text, rowBinding(identity, message.conversation)));
+    q.addBindValue(kBoundRows);
     if (!q.exec()) {
         return 0;
     }
@@ -149,7 +174,7 @@ QList<StoredMessage> HistoryStore::loadPage(const QString& identity, const QStri
     QList<StoredMessage> page;
     if (!open_) return page;
     QSqlQuery q(QSqlDatabase::database(connection_));
-    q.prepare("SELECT id, kind, sender, time, blob FROM messages "
+    q.prepare("SELECT id, kind, sender, time, blob, v FROM messages "
               "WHERE identity = ? AND conversation = ? AND (? = 0 OR id < ?) "
               "ORDER BY id DESC LIMIT ?");
     q.addBindValue(identity);
@@ -160,7 +185,8 @@ QList<StoredMessage> HistoryStore::loadPage(const QString& identity, const QStri
     if (!q.exec()) return page;
     while (q.next()) {
         StoredMessage m;
-        if (!decrypt(q.value(4).toByteArray(), &m.text)) {
+        const QByteArray aad = q.value(5).toInt() >= kBoundRows ? rowBinding(identity, conversation) : QByteArray();
+        if (!decrypt(q.value(4).toByteArray(), aad, &m.text)) {
             continue;
         }
         m.id = q.value(0).toLongLong();
@@ -179,7 +205,7 @@ QList<ConversationSummary> HistoryStore::conversations(const QString& identity) 
     if (!open_) return list;
     QSqlQuery q(QSqlDatabase::database(connection_));
     // The latest chat message (not a join/leave line) of each conversation.
-    q.prepare("SELECT m.conversation, m.sender, m.kind, m.time, m.blob FROM messages m "
+    q.prepare("SELECT m.conversation, m.sender, m.kind, m.time, m.blob, m.v FROM messages m "
               "JOIN (SELECT conversation, MAX(id) AS last FROM messages "
               "      WHERE identity = ? AND kind != 2 GROUP BY conversation) t ON m.id = t.last "
               "ORDER BY m.id DESC");
@@ -191,7 +217,8 @@ QList<ConversationSummary> HistoryStore::conversations(const QString& identity) 
         c.lastSender = q.value(1).toString();
         c.lastKind = q.value(2).toInt();
         c.lastTime = QDateTime::fromMSecsSinceEpoch(q.value(3).toLongLong());
-        decrypt(q.value(4).toByteArray(), &c.lastText);
+        const QByteArray aad = q.value(5).toInt() >= kBoundRows ? rowBinding(identity, c.conversation) : QByteArray();
+        decrypt(q.value(4).toByteArray(), aad, &c.lastText);
         list.append(c);
     }
     return list;

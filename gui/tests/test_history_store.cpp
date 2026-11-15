@@ -1,5 +1,10 @@
 #include "history_store.h"
 #include "key_vault.h"
+#include "../crypto/crypto_utils.h"
+
+#include <QSqlDatabase>
+#include <QSqlError>
+#include <QSqlQuery>
 
 #include <QDir>
 #include <QFile>
@@ -192,6 +197,60 @@ private slots:
         const QByteArray all = fileBytes(path) + fileBytes(path + "-wal");
         QVERIFY(!all.contains("zebrapartner"));
         QVERIFY(!all.contains("zebrasender"));
+    }
+
+    // A saved row only decrypts under the identity and conversation it was
+    // saved for, so rows can't be moved between people's histories.
+    void rows_are_bound_to_their_identity() {
+        QTemporaryDir d;
+        const QString path = d.filePath("bound.db");
+        HistoryStore s(path, key, "c11");
+        QString err;
+        QVERIFY(s.open(&err));
+        s.setChoice(kBob, HistoryChoice::Save);
+        s.setChoice(kAlice, HistoryChoice::Save);
+        const qint64 id = s.append(kBob, msg("carol", "for bob only"));
+        QVERIFY(id > 0);
+        QSqlQuery q(QSqlDatabase::database("c11"));
+        q.prepare("UPDATE messages SET identity = ? WHERE id = ?");
+        q.addBindValue(kAlice);
+        q.addBindValue(id);
+        QVERIFY(q.exec());
+        QVERIFY(s.loadPage(kAlice, "carol", 50).isEmpty());
+
+        q.prepare("UPDATE messages SET identity = ?, conversation = ? WHERE id = ?");
+        q.addBindValue(kBob);
+        q.addBindValue(QStringLiteral("dave"));
+        q.addBindValue(id);
+        QVERIFY(q.exec());
+        QVERIFY(s.loadPage(kBob, "dave", 50).isEmpty());
+    }
+
+    // Rows saved before rows were bound (version 1) still load.
+    void older_rows_still_load() {
+        QTemporaryDir d;
+        const QString path = d.filePath("old.db");
+        HistoryStore s(path, key, "c12");
+        QString err;
+        QVERIFY(s.open(&err));
+        SecureComm::CryptoManager crypto;
+        const std::string text = "saved long ago";
+        const std::vector<uint8_t> k(key.begin(), key.end());
+        const std::vector<uint8_t> iv = crypto.generate_random_bytes(12);
+        std::vector<uint8_t> sealed = crypto.encrypt_aes_gcm(std::vector<uint8_t>(text.begin(), text.end()), k, iv);
+        QByteArray blob(reinterpret_cast<const char*>(iv.data()), 12);
+        blob.append(reinterpret_cast<const char*>(sealed.data()), static_cast<qsizetype>(sealed.size()));
+        QSqlQuery q(QSqlDatabase::database("c12"));
+        q.prepare("INSERT INTO messages (identity, conversation, kind, sender, time, blob, v) VALUES (?, ?, 0, ?, ?, ?, 1)");
+        q.addBindValue(kBob);
+        q.addBindValue(QStringLiteral("carol"));
+        q.addBindValue(QStringLiteral("carol"));
+        q.addBindValue(QDateTime::currentDateTime().toMSecsSinceEpoch());
+        q.addBindValue(blob);
+        QVERIFY2(q.exec(), qPrintable(q.lastError().text()));
+        const auto page = s.loadPage(kBob, "carol", 50);
+        QCOMPARE(page.size(), 1);
+        QCOMPARE(page.first().text, QStringLiteral("saved long ago"));
     }
 
     void key_file_is_stable_and_wrapped() {

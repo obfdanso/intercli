@@ -67,8 +67,8 @@ public:
     int totalMessageRowsForTest() const;
 
 private:
-    QByteArray encrypt(const QString& text) const;
-    bool decrypt(const QByteArray& blob, QString* text) const;
+    QByteArray encrypt(const QString& text, const QByteArray& aad) const;
+    bool decrypt(const QByteArray& blob, const QByteArray& aad, QString* text) const;
 
     QString path_;
     QByteArray key_;
