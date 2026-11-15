@@ -84,6 +84,9 @@ public:
     // Test only: drops the connection as if the network failed, so
     // on_disconnected fires.
     void drop_connection_for_test();
+    // Test only: reports a receive error the way a bad frame would, leaving
+    // the socket itself open.
+    void fail_receive_for_test();
 
 private:
     bool send_chat(const ChatMessage& chat);

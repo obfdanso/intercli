@@ -222,12 +222,12 @@ void ChatController::signIn(const QString& host, int port, const QString& name) 
 }
 
 void ChatController::onConnectResult(bool ok, const QString& error) {
-    Q_UNUSED(error);
     finishWorker();
     if (ok) {
         return;  // the name answer arrives through onRegistered / onRegisterFailed
     }
-    const QString reason = QStringLiteral("Couldn't reach %1:%2").arg(host_).arg(port_);
+    // The client library says what went wrong: not found, unreachable, no answer.
+    const QString reason = error.isEmpty() ? QStringLiteral("Couldn't reach %1:%2").arg(host_).arg(port_) : error;
     abandonConnection();
     if (state_ == Connecting) {
         setErrors(reason, QString());
@@ -451,6 +451,10 @@ void ChatController::onSendKeyRotated() {
 void ChatController::onDisconnected(const QString& reason) {
     if (state_ == Online) {
         Q_UNUSED(reason);
+        // Close our end too: after a receive error the socket is still open
+        // and the server would keep showing us online.
+        ++generation_;
+        abandonConnection();
         disconnect_reason_ = QStringLiteral("Disconnected from server");
         needs_sign_in_ = false;
         // Nobody can be known to be online while we are cut off; the roster
@@ -520,6 +524,12 @@ void ChatController::signOut() {
     emit currentConversationChanged();
     emit onlineCountChanged();
     setState(SignedOut);
+}
+
+void ChatController::simulateReceiveError() {
+    if (client_) {
+        client_->fail_receive_for_test();
+    }
 }
 
 void ChatController::simulateConnectionLoss() {

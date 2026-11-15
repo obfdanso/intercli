@@ -95,6 +95,8 @@ public:
 
     // Test only: drops the connection as if the network failed.
     void simulateConnectionLoss();
+    // Test only: reports a receive error without closing the socket.
+    void simulateReceiveError();
 
 signals:
     void stateChanged();

@@ -141,9 +141,18 @@ bool ChatClient::connect(const std::string& host, uint16_t port, std::string* er
 
     // A server that accepts but never answers must not hold the handshake forever.
     set_receive_timeout(kHandshakeTimeoutMs);
-    if (!perform_handshake(error)) {
-        if (cancelled_ && error) {
-            *error = "Cancelled";
+    std::string handshake_error;
+    if (!perform_handshake(&handshake_error)) {
+        log(handshake_error);
+        if (error) {
+            const std::string where = host + ":" + std::to_string(port);
+            if (cancelled_) {
+                *error = "Cancelled";
+            } else if (handshake_error == "No handshake response received") {
+                *error = "The server at " + where + " didn't answer";
+            } else {
+                *error = "The secure handshake with " + where + " failed";
+            }
         }
         close_socket();
         return false;
@@ -244,7 +253,7 @@ bool ChatClient::connect_socket(const std::string& host, uint16_t port, std::str
         return fail("Cancelled");
     }
     if (!connected) {
-        return fail("Couldn't connect to " + host + ":" + port_text);
+        return fail("Couldn't reach " + host + ":" + port_text);
     }
     return true;
 }
@@ -303,6 +312,10 @@ void ChatClient::disconnect() {
 
     std::lock_guard<std::mutex> lock(send_mutex_);
     close_socket();
+}
+
+void ChatClient::fail_receive_for_test() {
+    report_lost("Receive error: test");
 }
 
 void ChatClient::drop_connection_for_test() {
@@ -576,7 +589,6 @@ std::vector<uint8_t> ChatClient::session_id_bytes() const {
 
 bool ChatClient::perform_handshake(std::string* error) {
     auto fail = [&](const std::string& reason) {
-        log(reason);
         if (error) {
             *error = reason;
         }

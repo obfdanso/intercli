@@ -35,6 +35,9 @@ struct Peer {
         ev.on_direct = [this](const std::string& f, const std::string& t) { add("direct:" + f + ":" + t); };
         ev.on_broadcast = [this](const std::string& f, const std::string& t) { add("broadcast:" + f + ":" + t); };
         ev.on_registered = [this](const std::string& n) { add("registered:" + n); };
+        ev.on_presence = [this](const std::string& n, bool joined, const std::string&) {
+            add("presence:" + n + (joined ? ":joined" : ":left"));
+        };
         client = std::make_unique<SecureComm::ChatClient>(ev);
         std::string err;
         if (client->connect("127.0.0.1", SecureComm::DEFAULT_PORT, &err)) {
@@ -44,6 +47,14 @@ struct Peer {
     void add(const std::string& s) {
         std::lock_guard<std::mutex> lock(mutex);
         received.push_back(s);
+    }
+    int count(const std::string& s) {
+        std::lock_guard<std::mutex> lock(mutex);
+        int n = 0;
+        for (const auto& r : received) {
+            if (r == s) ++n;
+        }
+        return n;
     }
     bool has(const std::string& s) {
         std::lock_guard<std::mutex> lock(mutex);
@@ -137,8 +148,24 @@ private slots:
         other.signIn("127.0.0.1", 1, "zed");
         QVERIFY2(timer.elapsed() < 50, "signIn must not block the UI thread");
         QTRY_COMPARE_WITH_TIMEOUT(other.state(), ChatController::SignedOut, 30000);
-        QVERIFY(!other.connectError().isEmpty());
+        QVERIFY(other.connectError().contains("Couldn't reach 127.0.0.1:1"));
         QVERIFY(other.nameError().isEmpty());
+    }
+
+    // The error says what actually went wrong, not always "couldn't reach".
+    void silent_server_reports_no_answer() {
+        SilentServer silent;
+        ChatController other;
+        other.signIn("127.0.0.1", silent.port(), "quiet");
+        QTRY_COMPARE_WITH_TIMEOUT(other.state(), ChatController::SignedOut, 30000);
+        QVERIFY2(other.connectError().contains("didn't answer"), qPrintable(other.connectError()));
+    }
+
+    void unknown_host_reports_not_found() {
+        ChatController other;
+        other.signIn("no-such-host.invalid", 8080, "lost");
+        QTRY_COMPARE_WITH_TIMEOUT(other.state(), ChatController::SignedOut, 30000);
+        QVERIFY2(other.connectError().contains("Couldn't find"), qPrintable(other.connectError()));
     }
 
     // A server that accepts but never answers: leaving must not freeze the UI.
@@ -321,6 +348,17 @@ private slots:
         QVERIFY(bob->messages()->count() >= everyoneRows);
         QVERIFY(bob->send("back"));
         QTRY_VERIFY_WITH_TIMEOUT(alice->has("broadcast:bob:back"), kWait);
+    }
+
+    // A receive error leaves the socket open; the app must close it so the
+    // server stops showing us online while the banner is up.
+    void receive_error_closes_the_connection() {
+        const int leftBefore = alice->count("presence:bob:left");
+        bob->simulateReceiveError();
+        QTRY_COMPARE_WITH_TIMEOUT(bob->state(), ChatController::Disconnected, kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(alice->count("presence:bob:left"), leftBefore + 1, kWait);
+        bob->reconnect();
+        QTRY_COMPARE_WITH_TIMEOUT(bob->state(), ChatController::Online, kWait);
     }
 
     void presence_rows() {
