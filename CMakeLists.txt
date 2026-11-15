@@ -11,7 +11,7 @@ find_package(OpenSSL REQUIRED)
 find_package(Threads REQUIRED)
 
 # Qt 6 is optional: without it everything except the desktop app still builds.
-find_package(Qt6 6.5 COMPONENTS Quick QuickControls2 Sql Test QUIET)
+find_package(Qt6 6.5 COMPONENTS Quick QuickControls2 Sql Test Network QUIET)
 
 # Include directories
 include_directories(include)
