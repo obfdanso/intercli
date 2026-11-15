@@ -12,6 +12,9 @@
     #include <arpa/inet.h>
     #include <netdb.h>
     #include <unistd.h>
+    #include <fcntl.h>
+    #include <cerrno>
+    #include <sys/select.h>
 #endif
 
 namespace SecureComm {
@@ -39,6 +42,9 @@ void shutdown_raw(intptr_t s) {
     shutdown(static_cast<socket_t>(s), SHUT_RDWR);
 #endif
 }
+
+constexpr int kConnectTimeoutMs = 10000;
+constexpr int kHandshakeTimeoutMs = 10000;
 
 MessageHeader make_header(MessageType type, uint32_t sequence, uint16_t payload_size) {
     MessageHeader header{};
@@ -123,40 +129,26 @@ bool ChatClient::connect(const std::string& host, uint16_t port, std::string* er
         return fail(std::string("Key generation failed: ") + e.what());
     }
 
-    addrinfo hints{};
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    addrinfo* results = nullptr;
-    const std::string port_text = std::to_string(port);
-    if (getaddrinfo(host.c_str(), port_text.c_str(), &hints, &results) != 0 || !results) {
-        return fail("Couldn't find the server " + host);
+    if (cancelled_) {
+        return fail("Cancelled");
     }
-
-    for (addrinfo* ai = results; ai; ai = ai->ai_next) {
-        socket_t s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-#ifdef _WIN32
-        if (s == INVALID_SOCKET) continue;
-#else
-        if (s < 0) continue;
-#endif
-        if (::connect(s, ai->ai_addr, static_cast<int>(ai->ai_addrlen)) == 0) {
-            socket_ = static_cast<intptr_t>(s);
-            break;
-        }
-        close_raw(static_cast<intptr_t>(s));
-    }
-    freeaddrinfo(results);
-
-    if (socket_ < 0) {
-        return fail("Couldn't connect to " + host + ":" + port_text);
-    }
-
-    log("Connected to server " + host + ":" + port_text);
-
-    if (!perform_handshake(error)) {
+    if (!connect_socket(host, port, error)) {
         close_socket();
         return false;
     }
+
+    log("Connected to server " + host + ":" + std::to_string(port));
+
+    // A server that accepts but never answers must not hold the handshake forever.
+    set_receive_timeout(kHandshakeTimeoutMs);
+    if (!perform_handshake(error)) {
+        if (cancelled_ && error) {
+            *error = "Cancelled";
+        }
+        close_socket();
+        return false;
+    }
+    set_receive_timeout(0);
 
     log("Secure connection established");
 
@@ -169,6 +161,118 @@ bool ChatClient::connect(const std::string& host, uint16_t port, std::string* er
     connected_ = true;
     receive_thread_ = std::thread(&ChatClient::receive_loop, this);
     return true;
+}
+
+// Connects without blocking for longer than kConnectTimeoutMs, checking for
+// cancel() every 100 ms. The socket is published in socket_ before connecting so
+// cancel() can reach it.
+bool ChatClient::connect_socket(const std::string& host, uint16_t port, std::string* error) {
+    auto fail = [&](const std::string& reason) {
+        if (error) {
+            *error = reason;
+        }
+        return false;
+    };
+
+    addrinfo hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    addrinfo* results = nullptr;
+    const std::string port_text = std::to_string(port);
+    if (getaddrinfo(host.c_str(), port_text.c_str(), &hints, &results) != 0 || !results) {
+        return fail("Couldn't find the server " + host);
+    }
+
+    bool connected = false;
+    for (addrinfo* ai = results; ai && !connected && !cancelled_; ai = ai->ai_next) {
+        socket_t s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+#ifdef _WIN32
+        if (s == INVALID_SOCKET) continue;
+        u_long nonblocking = 1;
+        ioctlsocket(s, FIONBIO, &nonblocking);
+#else
+        if (s < 0) continue;
+        fcntl(s, F_SETFL, fcntl(s, F_GETFL, 0) | O_NONBLOCK);
+#endif
+        socket_ = static_cast<intptr_t>(s);
+
+        int rc = ::connect(s, ai->ai_addr, static_cast<int>(ai->ai_addrlen));
+#ifdef _WIN32
+        const bool pending = rc != 0 && WSAGetLastError() == WSAEWOULDBLOCK;
+#else
+        const bool pending = rc != 0 && errno == EINPROGRESS;
+#endif
+        if (rc == 0) {
+            connected = true;
+        } else if (pending) {
+            for (int waited = 0; waited < kConnectTimeoutMs && !cancelled_; waited += 100) {
+                fd_set writable;
+                fd_set failed;
+                FD_ZERO(&writable);
+                FD_ZERO(&failed);
+                FD_SET(s, &writable);
+                FD_SET(s, &failed);
+                timeval tv{0, 100 * 1000};
+                const int ready = select(static_cast<int>(s) + 1, nullptr, &writable, &failed, &tv);
+                if (ready < 0) {
+                    break;
+                }
+                if (ready > 0) {
+                    int so_error = 0;
+                    socklen_t len = sizeof(so_error);
+                    getsockopt(s, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&so_error), &len);
+                    connected = FD_ISSET(s, &writable) && so_error == 0;
+                    break;
+                }
+            }
+        }
+
+        if (connected) {
+#ifdef _WIN32
+            u_long blocking = 0;
+            ioctlsocket(s, FIONBIO, &blocking);
+#else
+            fcntl(s, F_SETFL, fcntl(s, F_GETFL, 0) & ~O_NONBLOCK);
+#endif
+        } else {
+            close_socket();
+        }
+    }
+    freeaddrinfo(results);
+
+    if (cancelled_) {
+        return fail("Cancelled");
+    }
+    if (!connected) {
+        return fail("Couldn't connect to " + host + ":" + port_text);
+    }
+    return true;
+}
+
+void ChatClient::set_receive_timeout(int ms) {
+    const intptr_t s = socket_.load();
+    if (s < 0) {
+        return;
+    }
+#ifdef _WIN32
+    const DWORD value = static_cast<DWORD>(ms);
+    setsockopt(static_cast<socket_t>(s), SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&value), sizeof(value));
+#else
+    timeval value{ms / 1000, (ms % 1000) * 1000};
+    setsockopt(static_cast<socket_t>(s), SOL_SOCKET, SO_RCVTIMEO, &value, sizeof(value));
+#endif
+}
+
+void ChatClient::cancel() {
+    cancelled_ = true;
+    user_disconnect_ = true;
+    // Closing (not just shutting down) the socket is what wakes a recv that the
+    // peer will never answer; a pending connect notices the flag instead.
+    const intptr_t s = socket_.exchange(-1);
+    if (s >= 0) {
+        shutdown_raw(s);
+        close_raw(s);
+    }
 }
 
 void ChatClient::close_socket() {
@@ -235,7 +339,9 @@ bool ChatClient::request_name(const std::string& name) {
 }
 
 bool ChatClient::send_direct(const std::string& to, const std::string& text) {
-    if (text.size() > MAX_TEXT_LEN || to.empty() || to.size() >= MAX_NAME_LEN) {
+    // An over-long name is truncated by set_chat_field, as the client always
+    // did; the server then answers "No such user".
+    if (text.size() > MAX_TEXT_LEN || to.empty()) {
         return false;
     }
     ChatMessage msg = make_chat(ChatType::DIRECT);

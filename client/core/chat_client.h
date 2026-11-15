@@ -61,8 +61,13 @@ public:
     // receive thread. On failure returns false and, if error is given, a reason.
     bool connect(const std::string& host, uint16_t port, std::string* error);
 
-    // Safe from any thread, including inside a callback.
+    // Safe from another thread or inside a callback, but not at the same time as
+    // connect() on another thread: use cancel() for that.
     void disconnect();
+
+    // Makes a connect() running on another thread give up within about 100 ms.
+    // Safe from any thread. A cancelled client cannot connect again.
+    void cancel();
 
     // The server's answer arrives through on_registered or on_register_failed.
     bool request_name(const std::string& name);
@@ -84,6 +89,8 @@ private:
     bool send_chat(const ChatMessage& chat);
     bool rotate_locked();
     bool perform_handshake(std::string* error);
+    bool connect_socket(const std::string& host, uint16_t port, std::string* error);
+    void set_receive_timeout(int ms);
     void receive_loop();
     void dispatch_frame(const std::vector<uint8_t>& data);
     void handle_chat(const ChatMessage& msg);
@@ -107,6 +114,7 @@ private:
     std::thread receive_thread_;
     std::atomic<bool> connected_{false};
     std::atomic<bool> user_disconnect_{false};
+    std::atomic<bool> cancelled_{false};
 
     // Guards everything a send touches: the counter, the tx key and the socket writes.
     mutable std::mutex send_mutex_;

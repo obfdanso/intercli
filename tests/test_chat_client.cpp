@@ -1,6 +1,7 @@
 // Drives in-process ChatClients against a real server (started by run_with_server.sh).
 
 #include "chat_client.h"
+#include "silent_server.h"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -221,6 +222,67 @@ int main() {
         check(bob_log.disconnected == 0, "user disconnect does not report a lost connection");
     }
     check(!bob.connected(), "bob reports disconnected");
+
+    std::cout << "Long recipient name" << std::endl;
+    {
+        // Older clients truncated an over-long @name and the server answered
+        // "No such user"; a typo must not be treated as a failed send.
+        Recorder erin_log;
+        ChatClient erin(erin_log.make_events());
+        std::string err;
+        check(erin.connect("127.0.0.1", DEFAULT_PORT, &err), "erin connects");
+        erin.request_name("erin");
+        check(erin_log.wait_event("registered:erin"), "erin registers");
+        const std::string long_name(40, 'z');
+        check(erin.send_direct(long_name, "hi"), "direct to an over-long name is sent");
+        check(erin_log.wait_event("notice:No such user: " + std::string(MAX_NAME_LEN - 1, 'z')),
+              "server reports the truncated name as unknown");
+    }
+
+    std::cout << "Cancelling a connect" << std::endl;
+    {
+        SilentServer silent;
+        Recorder log;
+        ChatEvents ev = log.make_events();
+        ev.on_log = [&log](const std::string& line) { log.add("log:" + line); };
+        ChatClient c(ev);
+        std::atomic<bool> finished{false};
+        bool ok = true;
+        std::thread t([&] {
+            std::string err;
+            ok = c.connect("127.0.0.1", silent.port(), &err);
+            finished = true;
+        });
+        // Wait until the TCP connection is up and the handshake is waiting.
+        log.wait_event("log:Sent handshake init", 15000);
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        const auto start = std::chrono::steady_clock::now();
+        c.cancel();
+        while (!finished && std::chrono::steady_clock::now() - start < std::chrono::seconds(3)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        const auto took = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start).count();
+        check(finished && took < 500, "cancel() ends a connect stuck in the handshake (" +
+              std::to_string(took) + " ms)");
+        if (t.joinable()) t.join();
+        check(!ok, "a cancelled connect reports failure");
+    }
+
+    std::cout << "Handshake timeout" << std::endl;
+    {
+        SilentServer silent;
+        Recorder log;
+        ChatClient c(log.make_events());
+        std::string err;
+        const auto start = std::chrono::steady_clock::now();
+        const bool ok = c.connect("127.0.0.1", silent.port(), &err);
+        const auto took = std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::steady_clock::now() - start).count();
+        check(!ok && took <= 12, "a server that never answers fails within the timeout (" +
+              std::to_string(took) + " s)");
+        check(!err.empty(), "the timeout has a reason");
+    }
 
     std::cout << "Connect failure" << std::endl;
     {
