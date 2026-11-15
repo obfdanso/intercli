@@ -48,6 +48,9 @@ add_executable(server
     server/server.cpp
 )
 target_link_libraries(server intercli_server_core)
+if(WIN32)
+    target_link_libraries(server crypt32)
+endif()
 
 # Client protocol library shared by the terminal client and the desktop app
 add_library(intercli_client_core STATIC

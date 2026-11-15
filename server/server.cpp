@@ -4,10 +4,20 @@
 #include "secure_server.h"
 #include "../crypto/crypto_utils.h"
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <vector>
+
+#ifdef _WIN32
+#include <windows.h>
+#include <dpapi.h>
+#else
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 #include <atomic>
 #include <chrono>
@@ -25,31 +35,106 @@ void signal_handler(int) {
     g_running = false;
 }
 
-// The server's long-term identity lives in intercli-server.key next to where
-// it runs, so clients that joined before recognise it after a restart. Created
-// on first run, readable by the owner only.
+// The server's long-term identity, kept in the user's own settings folder so
+// clients that joined before recognise it after a restart. On Windows the
+// stored copy is wrapped with DPAPI (only this Windows user can unwrap it); on
+// other systems it is created owner-only and refused if anyone else could
+// read or change it. If it can't be kept safely, a temporary identity is used.
+#ifdef _WIN32
+std::filesystem::path identity_path() {
+    const char* appdata = std::getenv("APPDATA");
+    return appdata ? std::filesystem::path(appdata) / "intercli" / "server.key" : std::filesystem::path();
+}
+
+std::vector<uint8_t> dpapi(const std::vector<uint8_t>& in, bool protect) {
+    DATA_BLOB src = {static_cast<DWORD>(in.size()), const_cast<BYTE*>(in.data())};
+    DATA_BLOB out = {};
+    const BOOL ok = protect
+        ? CryptProtectData(&src, L"intercli server identity", nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &out)
+        : CryptUnprotectData(&src, nullptr, nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &out);
+    if (!ok) {
+        return {};
+    }
+    std::vector<uint8_t> result(out.pbData, out.pbData + out.cbData);
+    SecureZeroMemory(out.pbData, out.cbData);
+    LocalFree(out.pbData);
+    return result;
+}
+
 std::vector<uint8_t> load_or_create_identity() {
-    const std::filesystem::path path = "intercli-server.key";
-    std::ifstream in(path, std::ios::binary);
-    if (in) {
+    const std::filesystem::path path = identity_path();
+    if (path.empty()) {
+        return {};
+    }
+    std::error_code ec;
+    if (std::filesystem::exists(path, ec)) {
+        std::ifstream in(path, std::ios::binary);
+        std::vector<uint8_t> wrapped((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        std::vector<uint8_t> key = dpapi(wrapped, false);
+        if (key.size() == 32) {
+            return key;
+        }
+        std::cerr << "Can't read the saved server identity; using a temporary one" << std::endl;
+        return {};
+    }
+    std::filesystem::create_directories(path.parent_path(), ec);
+    SecureComm::CryptoManager crypto;
+    std::vector<uint8_t> key = crypto.generate_identity().private_raw;
+    const std::vector<uint8_t> wrapped = dpapi(key, true);
+    if (wrapped.empty()) {
+        return key;  // use it for this run only
+    }
+    std::ofstream out(path, std::ios::binary);
+    out.write(reinterpret_cast<const char*>(wrapped.data()), static_cast<std::streamsize>(wrapped.size()));
+    return key;
+}
+#else
+std::filesystem::path identity_path() {
+    const char* config = std::getenv("XDG_CONFIG_HOME");
+    const char* home = std::getenv("HOME");
+    if (config && *config) return std::filesystem::path(config) / "intercli" / "server.key";
+    if (home && *home) return std::filesystem::path(home) / ".config" / "intercli" / "server.key";
+    return {};
+}
+
+std::vector<uint8_t> load_or_create_identity() {
+    const std::filesystem::path path = identity_path();
+    if (path.empty()) {
+        return {};
+    }
+    struct stat st {};
+    if (lstat(path.c_str(), &st) == 0) {
+        // Only a plain file of ours that nobody else can read or change.
+        if (!S_ISREG(st.st_mode) || st.st_uid != getuid() || (st.st_mode & 077) != 0) {
+            std::cerr << "The saved server identity is not private; using a temporary one" << std::endl;
+            return {};
+        }
+        std::ifstream in(path, std::ios::binary);
         std::vector<uint8_t> key((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
         if (key.size() == 32) {
             return key;
         }
-        std::cerr << "Ignoring a damaged intercli-server.key; using a temporary identity" << std::endl;
+        std::cerr << "Can't read the saved server identity; using a temporary one" << std::endl;
         return {};
     }
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    chmod(path.parent_path().c_str(), 0700);
     SecureComm::CryptoManager crypto;
     std::vector<uint8_t> key = crypto.generate_identity().private_raw;
-    {
-        std::ofstream out(path, std::ios::binary);
-        out.write(reinterpret_cast<const char*>(key.data()), static_cast<std::streamsize>(key.size()));
+    // Created owner-only in one step; O_EXCL and O_NOFOLLOW refuse a planted file or link.
+    const int fd = open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+    if (fd < 0) {
+        return key;  // use it for this run only
     }
-    std::error_code ec;
-    std::filesystem::permissions(path, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
-                                 std::filesystem::perm_options::replace, ec);
+    const bool ok = write(fd, key.data(), key.size()) == static_cast<ssize_t>(key.size());
+    close(fd);
+    if (!ok) {
+        unlink(path.c_str());
+    }
     return key;
 }
+#endif
 
 } // namespace
 

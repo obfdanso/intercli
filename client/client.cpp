@@ -22,7 +22,7 @@ void print_incoming(const std::string& line) {
 
 class TerminalClient {
 public:
-    TerminalClient() : client_(make_events()) {}
+    explicit TerminalClient(std::string room_code) : client_(make_events()), room_code_(std::move(room_code)) {}
 
     bool connect(const std::string& host, uint16_t port) {
         std::string error;
@@ -131,7 +131,7 @@ private:
             if (!std::getline(std::cin, name)) {
                 return false;
             }
-            if (!client_.request_name(name)) {
+            if (!client_.request_name(name, room_code_)) {
                 return false;
             }
 
@@ -175,6 +175,7 @@ private:
     }
 
     SecureComm::ChatClient client_;
+    std::string room_code_;
     std::mutex register_mutex_;
     std::condition_variable register_cv_;
     bool register_answered_ = false;
@@ -185,8 +186,8 @@ private:
 
 int main(int argc, char* argv[]) {
     if (argc < 2) {
-        std::cout << "Usage: " << argv[0] << " <server_ip> [port]" << std::endl;
-        std::cout << "Example: " << argv[0] << " 127.0.0.1 8080" << std::endl;
+        std::cout << "Usage: " << argv[0] << " <server_ip> [port] [room_code]" << std::endl;
+        std::cout << "Example: " << argv[0] << " 127.0.0.1 8080 K7P-29Q" << std::endl;
         return 1;
     }
 
@@ -201,7 +202,7 @@ int main(int argc, char* argv[]) {
     try {
         // Inside the try: std::stoi throws on a non-numeric port.
         const uint16_t port = (argc > 2) ? static_cast<uint16_t>(std::stoi(argv[2])) : SecureComm::DEFAULT_PORT;
-        TerminalClient client;
+        TerminalClient client(argc > 3 ? argv[3] : "");
 
         if (!client.connect(server_ip, port)) {
             std::cerr << "Failed to connect to server" << std::endl;

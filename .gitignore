@@ -21,5 +21,3 @@ CMakeFiles/
 cmake_install.cmake
 CTestTestfile.cmake
 
-# The standalone server keeps its identity key here
-intercli-server.key
