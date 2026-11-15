@@ -17,7 +17,8 @@ constexpr quint16 kPort = 18081;
 ChatAnnouncement announcement(const QString& id = QStringLiteral("chat-1"), int people = 1) {
     ChatAnnouncement a;
     a.chatId = id;
-    a.chatName = QStringLiteral("Danso's chat");
+    // The longest name allowed, made of characters that grow when escaped.
+    a.chatName = QStringLiteral("Danso's chat") + QString(52, QLatin1Char('"'));
     a.hostName = QStringLiteral("Danso");
     a.safetyCode = QStringLiteral("1234 5678 9012 3456 7890");
     a.identityKey = QByteArray(32, '\x5a');
@@ -50,6 +51,9 @@ private slots:
         QByteArray reply(int(asker.pendingDatagramSize()), 0);
         asker.readDatagram(reply.data(), reply.size());
         QVERIFY(reply.startsWith("INTERCLI!2"));
+        // Never bigger than the question, even with a long name.
+        QVERIFY2(reply.size() < ChatFinder::queryDatagram().size(),
+                 qPrintable(QString("reply %1 bytes, query %2").arg(reply.size()).arg(ChatFinder::queryDatagram().size())));
         QVERIFY(reply.contains("chat-1"));
         QVERIFY(reply.contains("Danso's chat"));
     }
@@ -65,7 +69,7 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(finder.rowCount(), 1, 3000);
         const QModelIndex i = finder.index(0);
         QCOMPARE(finder.data(i, ChatFinder::ChatIdRole).toString(), QStringLiteral("chat-1"));
-        QCOMPARE(finder.data(i, ChatFinder::ChatNameRole).toString(), QStringLiteral("Danso's chat"));
+        QVERIFY(finder.data(i, ChatFinder::ChatNameRole).toString().startsWith(QStringLiteral("Danso's chat")));
         QCOMPARE(finder.data(i, ChatFinder::HostNameRole).toString(), QStringLiteral("Danso"));
         QCOMPARE(finder.data(i, ChatFinder::PeopleRole).toInt(), 1);
         QCOMPARE(finder.data(i, ChatFinder::PortRole).toInt(), 8082);
@@ -108,7 +112,7 @@ private slots:
         asker.writeDatagram(QByteArray("INTERCLI?2"), QHostAddress::LocalHost, kPort);
         QTest::qWait(500);
         QVERIFY(!asker.hasPendingDatagrams());
-        QVERIFY(ChatFinder::queryDatagram().size() >= 256);
+        QVERIFY(ChatFinder::queryDatagram().size() >= 512);
     }
 
     void replies_are_rate_limited_per_sender() {

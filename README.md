@@ -12,8 +12,10 @@ room code. No internet connection is needed.
   each handshake. The app remembers each chat's key and refuses one that changes, and
   both sides can compare a 20-digit safety code.
 - **Tamper and replay protection**: each frame's type, sequence number and session are
-  bound into the encryption; altered, replayed, reordered or injected frames end the
-  connection.
+  bound into the encryption; altered, replayed, reordered or forged message and
+  key-rotation frames end the connection. (Plain error notices from the server are not
+  authenticated; someone on the network could show a fake "server error" line, but
+  can't read or change messages that way.)
 - **Key rotation**: each side changes the key it sends with every 10 messages (or on
   request), with an authenticated rotation marker.
 - **Room codes**: a hosted chat needs its room code to join; wrong guesses are slowed

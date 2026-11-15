@@ -14,7 +14,7 @@ namespace {
 const QByteArray kQuery = QByteArrayLiteral("INTERCLI?2");
 const QByteArray kReply = QByteArrayLiteral("INTERCLI!2");
 constexpr int kMaxDatagram = 1024;
-constexpr int kQuerySize = 256;          // queries are at least this big
+constexpr int kQuerySize = 512;          // queries are at least this big, more than any answer
 constexpr int kMaxRows = 64;             // the whole "Chats nearby" list
 constexpr int kMaxRowsPerAddress = 4;    // chats one address can list
 constexpr qint64 kReplyIntervalMs = 500; // at most one answer per sender per interval
@@ -117,7 +117,6 @@ void ChatBeacon::answer() {
         o["id"] = announcement_.chatId;
         o["name"] = announcement_.chatName;
         o["host"] = announcement_.hostName;
-        o["code"] = announcement_.safetyCode;
         o["key"] = QString::fromLatin1(announcement_.identityKey.toHex());
         o["port"] = announcement_.port;
         o["people"] = announcement_.people;
