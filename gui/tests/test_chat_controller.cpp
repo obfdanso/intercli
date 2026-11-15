@@ -381,6 +381,23 @@ private slots:
         QCOMPARE(host.peopleInChat(), 2);
         QSettings().remove("identities/chat:" + chatId);
 
+        // A first join to a chat whose server proves a different key than the
+        // one announced is refused before the code is sent (someone redirected
+        // the connection).
+        {
+            ChatController redirected(nullptr, nullptr, 18085);
+            const QByteArray fake = QByteArray("INTERCLI!2") +
+                "{\"id\":\"fake-chat\",\"name\":\"Hana chat\",\"host\":\"hana\",\"port\":" +
+                QByteArray::number(hosting.port()) + ",\"people\":2,\"code\":\"1\",\"key\":\"" +
+                QByteArray(64, 'b') + "\"}";
+            redirected.nearby()->injectReplyForTests(fake, QHostAddress::LocalHost);
+            redirected.joinChat("fake-chat", code, "victim");
+            QTRY_COMPARE_WITH_TIMEOUT(redirected.state(), ChatController::SignedOut, kWait);
+            QVERIFY2(redirected.connectError().contains("identity"), qPrintable(redirected.connectError()));
+            QTest::qWait(500);
+            QCOMPARE(host.peopleInChat(), 2);
+        }
+
         // The joiner drops and comes back: found again by chat id.
         joiner.simulateConnectionLoss();
         QTRY_COMPARE_WITH_TIMEOUT(joiner.state(), ChatController::Disconnected, kWait);

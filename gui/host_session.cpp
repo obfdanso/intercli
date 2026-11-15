@@ -134,6 +134,7 @@ void HostSession::announce() {
     a.chatName = chat_name_;
     a.hostName = host_name_;
     a.safetyCode = safetyCode();
+    a.identityKey = identity_public_;
     a.port = port_;
     a.people = people_;
     beacon_.setAnnouncement(a);

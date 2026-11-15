@@ -189,6 +189,10 @@ void ChatController::startConnect(const QString& name) {
     identity_was_known_ = pinned.size() == 32;
     if (identity_was_known_) {
         client_->set_expected_identity(std::vector<uint8_t>(pinned.begin(), pinned.end()));
+    } else if (announced_identity_.size() == 32) {
+        // A first join from the list: the server must prove the key the chat
+        // announced, so redirecting the connection can't capture the code.
+        client_->set_expected_identity(std::vector<uint8_t>(announced_identity_.begin(), announced_identity_.end()));
     }
 
     const quint64 gen = generation_;
@@ -259,6 +263,7 @@ void ChatController::signIn(const QString& host, int port, const QString& name, 
     host_ = host.trimmed();
     port_ = port;
     chat_id_.clear();
+    announced_identity_.clear();
     room_code_ = QString::fromStdString(SecureComm::normalize_room_code(ss(roomCode)));
     QSettings settings;
     settings.setValue("lastHost", host_);
@@ -284,6 +289,7 @@ void ChatController::joinChat(const QString& chatId, const QString& roomCode, co
     port_ = chat->port;
     chat_id_ = chatId;
     room_code_ = code;
+    announced_identity_ = chat->identityKey;
     beginSignIn(name);
 }
 
@@ -317,6 +323,7 @@ void ChatController::onHostStarted(quint16 port) {
     port_ = port;
     chat_id_ = host_session_->chatId();
     room_code_ = host_session_->roomCode();
+    announced_identity_ = host_session_->identityPublic();
     // We know our own identity, so it is pinned from the start.
     QSettings().setValue("identities/chat:" + chat_id_, host_session_->identityPublic().toHex());
     emit hostingChanged();

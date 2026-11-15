@@ -19,6 +19,7 @@ ChatAnnouncement announcement(const QString& id = QStringLiteral("chat-1"), int 
     a.chatName = QStringLiteral("Danso's chat");
     a.hostName = QStringLiteral("Danso");
     a.safetyCode = QStringLiteral("1234 5678 9012 3456 7890");
+    a.identityKey = QByteArray(32, '\x5a');
     a.port = 8082;
     a.people = people;
     return a;
@@ -69,6 +70,7 @@ private slots:
         QCOMPARE(finder.data(i, ChatFinder::PortRole).toInt(), 8082);
         QVERIFY(!finder.data(i, ChatFinder::AddressRole).toString().isEmpty());
         QVERIFY(finder.find(QStringLiteral("chat-1")).has_value());
+        QCOMPARE(finder.find(QStringLiteral("chat-1"))->identityKey, QByteArray(32, '\x5a'));
         QCOMPARE(finder.find(QStringLiteral("chat-1"))->port, quint16(8082));
 
         // People count changes are picked up.
@@ -87,7 +89,7 @@ private slots:
         finder.start(kPort);
         // (No raw string here: moc misreads the apostrophe inside one.)
         const QByteArray reply = QByteArray("INTERCLI!2") +
-            "{\"id\":\"chat-9\",\"name\":\"Kofi chat\",\"host\":\"Kofi\",\"port\":8080,\"people\":2,\"code\":\"1 2 3 4 5\"}";
+            "{\"id\":\"chat-9\",\"name\":\"Kofi chat\",\"host\":\"Kofi\",\"port\":8080,\"people\":2,\"code\":\"1 2 3 4 5\",\"key\":\"" + QByteArray(64, 'a') + "\"}";
         finder.injectReplyForTests(reply, QHostAddress(QStringLiteral("192.168.1.20")));
         finder.injectReplyForTests(reply, QHostAddress(QStringLiteral("10.0.0.5")));
         QCOMPARE(finder.rowCount(), 1);
@@ -134,7 +136,7 @@ private slots:
         finder.setTimingForTests(200, 5000);
         finder.start(kPort);
         const QByteArray reply = QByteArray("INTERCLI!2") +
-            "{\"id\":\"chat-5\",\"name\":\"Ama chat\",\"host\":\"Ama\",\"port\":8080,\"people\":2,\"code\":\"1\"}";
+            "{\"id\":\"chat-5\",\"name\":\"Ama chat\",\"host\":\"Ama\",\"port\":8080,\"people\":2,\"code\":\"1\",\"key\":\"" + QByteArray(64, 'a') + "\"}";
         finder.injectReplyForTests(reply, QHostAddress(QStringLiteral("192.168.1.20")));
         finder.injectReplyForTests(reply, QHostAddress(QStringLiteral("192.168.1.66")));
         QCOMPARE(finder.rowCount(), 1);
@@ -148,14 +150,14 @@ private slots:
         // One address can list only a few chats.
         for (int i = 0; i < 20; ++i) {
             const QByteArray r = QByteArray("INTERCLI!2") + "{\"id\":\"one-" + QByteArray::number(i) +
-                "\",\"name\":\"x\",\"host\":\"x\",\"port\":8080,\"people\":1,\"code\":\"1\"}";
+                "\",\"name\":\"x\",\"host\":\"x\",\"port\":8080,\"people\":1,\"code\":\"1\",\"key\":\"" + QByteArray(64, 'a') + "\"}";
             finder.injectReplyForTests(r, QHostAddress(QStringLiteral("10.1.1.1")));
         }
         QCOMPARE(finder.rowCount(), 4);
         // And the whole list has a ceiling.
         for (int i = 0; i < 200; ++i) {
             const QByteArray r = QByteArray("INTERCLI!2") + "{\"id\":\"many-" + QByteArray::number(i) +
-                "\",\"name\":\"x\",\"host\":\"x\",\"port\":8080,\"people\":1,\"code\":\"1\"}";
+                "\",\"name\":\"x\",\"host\":\"x\",\"port\":8080,\"people\":1,\"code\":\"1\",\"key\":\"" + QByteArray(64, 'a') + "\"}";
             finder.injectReplyForTests(r, QHostAddress(QStringLiteral("10.2.%1.%2").arg(i / 200).arg(i % 200 + 1)));
         }
         QCOMPARE(finder.rowCount(), 64);

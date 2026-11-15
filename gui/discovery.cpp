@@ -34,10 +34,13 @@ std::optional<ChatAnnouncement> parseReply(const QByteArray& datagram) {
     a.chatName = o.value("name").toString();
     a.hostName = o.value("host").toString();
     a.safetyCode = o.value("code").toString();
+    const QString keyHex = o.value("key").toString();
+    a.identityKey = QByteArray::fromHex(keyHex.toLatin1());
     const int port = o.value("port").toInt(0);
     a.people = o.value("people").toInt(-1);
     if (a.chatId.isEmpty() || a.chatId.size() > 64 || a.chatName.isEmpty() || a.chatName.size() > 64 ||
-        a.hostName.size() > 31 || a.safetyCode.size() > 32 || port < 1 || port > 65535 || a.people < 0 ||
+        a.hostName.size() > 31 || a.safetyCode.size() > 32 || keyHex.size() != 64 || a.identityKey.size() != 32 ||
+        port < 1 || port > 65535 || a.people < 0 ||
         a.people > 100000) {
         return std::nullopt;
     }
@@ -110,6 +113,7 @@ void ChatBeacon::answer() {
         o["name"] = announcement_.chatName;
         o["host"] = announcement_.hostName;
         o["code"] = announcement_.safetyCode;
+        o["key"] = QString::fromLatin1(announcement_.identityKey.toHex());
         o["port"] = announcement_.port;
         o["people"] = announcement_.people;
         socket_->writeDatagram(kReply + QJsonDocument(o).toJson(QJsonDocument::Compact), from, fromPort);

@@ -216,6 +216,7 @@ private:
     QString host_error_;
     QByteArray server_identity_;
     bool identity_was_known_ = false;
+    QByteArray announced_identity_;  // from the list; expected on a first join
     QString identity_;
     bool history_loaded_ = false;
 

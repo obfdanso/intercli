@@ -28,6 +28,7 @@ struct ChatAnnouncement {
     QString chatName;
     QString hostName;
     QString safetyCode;
+    QByteArray identityKey;  // the host's 32-byte identity key; a first join expects it
     quint16 port = 0;
     int people = 0;
     QHostAddress address;  // where the reply came from (finder side only)
