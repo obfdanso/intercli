@@ -1,27 +1,32 @@
-# Secure Communication Protocol
+# intercli
 
-A comprehensive C++ implementation of a secure communication protocol with encryption, key exchange, forward secrecy, and authentication.
+An encrypted chat for people on the same network: a desktop app for Windows (and a
+terminal client) where one person hosts a chat and others find it and join with a
+room code. No internet connection is needed.
 
 ## 🛡️ Security Features
 
-### Core Security Features
-- **Message Encryption**: All messages are encrypted using AES-256-GCM
-- **Key Exchange**: RSA-2048 and Diffie-Hellman key exchange for secure communication
-- **Forward Secrecy**: Perfect Forward Secrecy (PFS) ensures past messages remain secure even if keys are compromised
-- **Authentication**: Digital signatures and session verification
-- **Key Rotation**: Automatic and manual key rotation for enhanced security
+- **Encryption**: every message is encrypted with AES-256-GCM under keys from a fresh
+  Diffie-Hellman exchange (ffdhe2048) for each connection.
+- **Server identity**: the server proves who it is with an Ed25519 key, by signing
+  each handshake. The app remembers each chat's key and refuses one that changes, and
+  both sides can compare a 20-digit safety code.
+- **Tamper and replay protection**: each frame's type, sequence number and session are
+  bound into the encryption; altered, replayed, reordered or injected frames end the
+  connection.
+- **Key rotation**: each side changes the key it sends with every 10 messages (or on
+  request), with an authenticated rotation marker.
+- **Room codes**: a hosted chat needs its room code to join; wrong guesses are slowed
+  down and locked out per address.
+- **Saved messages** (optional): encrypted on disk with a key protected by your Windows
+  account, and tied to the chat and name they belong to.
 
-### Technical Implementation
-- **RSA-2048**: For initial key exchange and digital signatures
-- **Diffie-Hellman**: For ephemeral key generation and forward secrecy
-- **AES-256-GCM**: For message encryption with authenticated encryption
-- **SHA-256**: For hashing and HMAC generation
-- **PBKDF2**: For key derivation with salt
+See [Security details](#-security-details) for how this works and what it doesn't cover.
 
 ## 📁 Project Structure
 
 ```
-secure_comm/
+intercli/
 ├── CMakeLists.txt          # Build configuration
 ├── include/
 │   └── common.h           # Shared data structures and constants
@@ -29,7 +34,8 @@ secure_comm/
 │   ├── crypto_utils.h     # Cryptographic utilities header
 │   └── crypto_utils.cpp   # Cryptographic implementation
 ├── server/
-│   └── server.cpp         # Secure server implementation
+│   ├── core/              # Chat server library (server.exe and hosting in the app)
+│   └── server.cpp         # Standalone server
 ├── client/
 │   ├── core/              # Client protocol library shared by both clients
 │   └── client.cpp         # Terminal client
@@ -124,29 +130,52 @@ Windows (Visual Studio builds need the configuration named):
 cd build && ctest -C Release --output-on-failure
 ```
 
-This runs the `dh_key_exchange`, `aes_gcm`, `chat_envelope`, `directional_keys` and
-`roster` unit tests, plus `chat_integration` and `chat_client`, which start a real server
-on port 8080 and drive clients against it (they need `bash`, such as Git Bash on Windows,
-and are skipped where bash is not available).
+This runs the crypto unit tests (`dh_key_exchange`, `aes_gcm`, `identity`,
+`chat_envelope`, `directional_keys`, `roster`), the server library test
+(`server_core`, including room codes and lockouts), `chat_client` (real clients
+against a real server, including tampered, replayed and injected frames through a
+test proxy) and `chat_integration` (three terminal clients). With Qt installed it also
+runs the desktop app's tests (`test_*`): models, the controller, saved messages,
+the title bar, finding chats nearby and hosting. The tests that start a server need
+`bash` (Git Bash on Windows) and are skipped where it isn't available.
 
 ## 🚀 Usage
 
-### Starting the Server
+### Chatting on the same Wi-Fi (desktop app)
+
+Everyone needs to be on the same Wi-Fi, router or phone hotspot. No internet is needed.
+
+1. **Host:** open intercli, type your name and click **Host a chat**. The app starts the
+   chat on your PC and shows a **room code** (like `K7P-29Q`) in the details panel. The
+   code stays the same every time you host, so share it once.
+2. **Join:** everyone else opens intercli, types their name, picks your chat under
+   **Chats nearby**, enters the room code and clicks **Join**. Their app remembers the
+   code for next time.
+3. If someone can't see the list (some networks block it), they can use **Join by
+   address** with your PC's address (`ipconfig` shows it) and port 8080.
+
+Good to know:
+- The first time you host, Windows asks to let intercli through the firewall. Choose
+  **Allow**, or nobody can join.
+- On a network Windows calls **Public** (phone hotspots and new Wi-Fi often are),
+  others can't reach you even after Allow. The app warns you; switch the network to
+  Private in Settings > Network & internet.
+- When the host signs out or closes the app, the chat ends for everyone (the app asks
+  first).
+- Compare the **safety code** in the details panel out loud with the host if you want
+  to be sure nobody is in between.
+
+### Starting the standalone server
 
 ```bash
 ./server
 ```
 
-The server takes no arguments and always listens on the default port (8080).
+`server.exe` runs an open chat (no room code) on port 8080. It keeps its identity key in
+`%APPDATA%\intercli\server.key` (protected by Windows for your user; on Linux/macOS
+`~/.config/intercli/server.key`, owner-only) and prints its safety code when it starts.
 
-The server will:
-- Generate RSA-2048 key pair
-- Listen for client connections
-- Perform secure handshakes
-- Handle encrypted messages
-- Automatically rotate keys every 10 messages
-
-### Connecting with the Client
+### Connecting with the terminal client
 
 ```bash
 ./client <server_ip> [port]
@@ -155,6 +184,15 @@ The server will:
 **Example:**
 ```bash
 ./client 127.0.0.1 8080
+```
+
+It prints the server's safety code after connecting. To join a chat that has a room
+code, set it in the environment first rather than on the command line, where other
+programs could see it:
+
+```bat
+set INTERCLI_ROOM_CODE=K7P-29Q
+client 192.168.1.20 8080
 ```
 
 ### Registering a name
@@ -223,92 +261,58 @@ history.
 
 ### Who can read your messages
 
-The server decrypts every message in order to route it, so it can read all
-relayed traffic. Encryption protects messages from a network observer, not from
-the server operator. End-to-end encryption between clients is not implemented.
+The host's server decrypts every message in order to route it, so the host can read
+everything sent in their chat. Encryption protects messages from other people on the
+network, not from the host. End-to-end encryption between users is not implemented.
 
-## 🔐 Security Protocol Details
+## 🔐 Security details
 
-### Handshake Process
+### Handshake (protocol version 2)
 
-1. **Client Init**: Client sends RSA public key and nonce
-2. **Server Response**: Server generates DH key pair and sends public key
-3. **Key Exchange**: Both parties perform DH key exchange
-4. **Session Key**: Derive AES session key using shared secret and nonce
-5. **Authentication**: Verify session and establish secure channel
+1. The client sends a fresh Diffie-Hellman public key and a random nonce.
+2. The server answers with its own fresh DH key and nonce, its Ed25519 identity key,
+   and a signature over the session id, both DH keys and both nonces.
+3. The client checks the signature. If it has joined this chat before, or the chat
+   announced its key in the nearby list, the key must match, or the connection is
+   refused before anything else is sent ("This chat's identity has changed").
+4. Both sides derive separate send and receive keys from the DH secret and both nonces.
 
-### Message Encryption
+Older (version 1) clients or servers are refused with a message asking to update.
 
-1. **Generate IV**: Random initialization vector for each message
-2. **Encrypt**: AES-256-GCM encryption with session key
-3. **Sign**: Digital signature using RSA private key
-4. **Send**: Transmit encrypted message with signature
+### Messages
 
-### Forward Secrecy
+- Each frame is encrypted with AES-256-GCM using a random 96-bit IV.
+- The protocol version, frame type, sequence number and session id are authenticated
+  as associated data, and sequence numbers must arrive strictly in order, so an
+  altered, replayed, reordered or forged frame ends the connection.
+- Every 10 messages (or when asked) each side rotates the key it sends with, announced
+  by an encrypted rotation frame.
 
-- **Ephemeral Keys**: DH keys are generated per session
-- **Key Rotation**: Automatic rotation every 10 messages
-- **Manual Rotation**: Client can request key rotation anytime
-- **Session Isolation**: Each session has unique keys
+### Room codes
 
-## 🛠️ API Overview
+- Six characters from an alphabet without look-alikes, checked by the server before
+  the name (so names can't be probed without the code), compared in constant time.
+- Each wrong code waits a second; five on one connection close it; ten from one
+  address lock that address out (for a minute, doubling each time, up to an hour).
+  An address can have at most 8 connections that haven't joined.
 
-### CryptoManager Class
-```cpp
-// Key generation
-KeyPair generate_rsa_keypair(size_t bits = 2048);
-KeyPair generate_dh_keypair();
+### Finding chats nearby
 
-// Encryption/Decryption
-std::vector<uint8_t> encrypt_aes_gcm(data, key, iv);
-std::vector<uint8_t> decrypt_aes_gcm(encrypted_data, key, iv);
+- Joiners send a "who is hosting?" UDP query on port 8081 from a throwaway port; hosts
+  answer only machines on their own networks, at most twice a second per sender, and
+  queries are larger than answers so they can't be used to amplify traffic.
+- The list ignores malformed answers, keeps a chat at the address it was first heard
+  from, and is capped in size.
 
-// Key exchange
-std::vector<uint8_t> perform_dh_key_exchange(private_key, peer_public_key);
-std::vector<uint8_t> derive_shared_secret(dh_result, salt);
+### Limits
 
-// Digital signatures
-std::vector<uint8_t> sign_data(data, private_key);
-bool verify_signature(data, signature, public_key);
-```
-
-### SessionManager Class
-```cpp
-// Session management
-SessionInfo create_session(uint32_t client_id);
-SessionInfo get_session(uint32_t session_id);
-void update_session_activity(uint32_t session_id);
-
-// Authentication
-bool authenticate_session(uint32_t session_id, auth_data);
-AuthResult verify_session_auth(uint32_t session_id, signature);
-
-// Key management
-void set_session_key(uint32_t session_id, key);
-std::vector<uint8_t> get_session_key(uint32_t session_id);
-void rotate_session_key(uint32_t session_id);
-```
-
-## 🔍 Security Analysis
-
-### Cryptographic Strength
-- **RSA-2048**: 112-bit security level
-- **AES-256**: 256-bit security level
-- **SHA-256**: 128-bit collision resistance
-- **DH-2048**: 112-bit security level
-
-### Attack Resistance
-- **Man-in-the-Middle**: Prevented by digital signatures
-- **Replay Attacks**: Prevented by nonces and timestamps
-- **Key Compromise**: Forward secrecy protects past messages
-- **Session Hijacking**: Prevented by session authentication
-
-### Best Practices Implemented
-- **Constant-time operations**: For cryptographic comparisons
-- **Secure random generation**: Using OpenSSL's RAND_bytes
-- **Key rotation**: Regular key updates
-- **Session expiration**: Automatic cleanup of old sessions
-- **Error handling**: Secure error reporting without information leakage
+- **First contact:** the very first join to a chat trusts the identity key the chat
+  announces. Someone already on the network who answers faster than the real host
+  could pose as it. Comparing safety codes out loud closes that gap.
+- **The host reads everything** (see above). There is no end-to-end encryption.
+- **Names aren't accounts:** anyone with the room code can join under any free name.
+- **Saved messages** are readable by anyone using the same Windows account who signs
+  in with the same name to the same chat.
 
 ## 🧪 Testing
 
@@ -321,11 +325,11 @@ void rotate_session_key(uint32_t session_id);
 ./client 127.0.0.1 8080
 ```
 
-### Security Verification
-- Check that messages are encrypted (use Wireshark)
-- Verify key rotation works
-- Test session expiration
-- Confirm forward secrecy
+### Security checks covered by the tests
+- Altered, replayed, injected and truncated frames (through a man-in-the-middle test proxy)
+- A server proving a different identity than expected
+- Wrong room codes, guessing across connections and in parallel, lockout and its end
+- Spoofed, malformed and flooding discovery answers
 
 ## 📝 License
 
