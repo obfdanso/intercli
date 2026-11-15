@@ -89,6 +89,8 @@ struct ClientConnection {
     std::string       name;
     std::mutex        send_mutex;
     uint32_t          sent_count = 0;  // guarded by send_mutex
+    uint32_t          tx_seq = 0;      // last frame number sent; guarded by send_mutex
+    uint32_t          rx_seq = 0;      // last frame number received; receive thread only
     std::atomic<bool> alive{true};
 };
 
@@ -111,7 +113,7 @@ struct SecureServer::Impl {
     std::condition_variable stop_cv_;
     std::map<std::string, std::shared_ptr<ClientConnection>> registry_;
     std::mutex registry_mutex_;
-    KeyPair server_keypair_;
+    IdentityKey identity_;
 
     explicit Impl(ServerOptions options)
         : options_(std::move(options)), server_socket_(-1), running_(false) {
@@ -127,9 +129,10 @@ struct SecureServer::Impl {
         session_manager_ = std::make_unique<SessionManager>();
         key_manager_ = std::make_unique<KeyManager>();
         
-        // Generate server's RSA key pair
-        server_keypair_ = crypto_manager_->generate_rsa_keypair(2048);
-        LogLine(this, false) << "Server RSA key pair generated successfully";
+        // The long-term identity the server signs every handshake with.
+        identity_ = options_.identity_private.size() == 32
+            ? crypto_manager_->identity_from_private(options_.identity_private)
+            : crypto_manager_->generate_identity();
     }
 
     ~Impl() {
@@ -186,7 +189,7 @@ struct SecureServer::Impl {
 
         running_ = true;
         LogLine(this, false) << "Secure server started on port " << port;
-        LogLine(this, false) << "Server public key: " << bytes_to_hex(server_keypair_.public_key).substr(0, 64) << "...";
+        LogLine(this, false) << "Server safety code: " << safety_code(identity_.public_raw);
 
         // Expire old sessions every 5 minutes; stop() wakes this early to exit.
         cleanup_thread_ = std::thread([this]() {
@@ -261,7 +264,7 @@ struct SecureServer::Impl {
     }
 
     std::vector<uint8_t> identity_public() const {
-        return server_keypair_.public_key;
+        return identity_.public_raw;
     }
 
     void handle_client(std::shared_ptr<ClientConnection> conn) {
@@ -307,95 +310,114 @@ struct SecureServer::Impl {
         connections_cv_.notify_all();
     }
 
+    // Sends a header-only error frame on a socket not yet tied to a connection.
+    void send_raw_error(intptr_t client_socket, ErrorCode code) {
+        MessageHeader header{};
+        header.version = PROTOCOL_VERSION;
+        header.type = MessageType::ERROR_MESSAGE;
+        header.timestamp = get_current_timestamp_seconds();
+        header.payload_size = sizeof(ErrorCode);
+        std::vector<uint8_t> frame = serialize_header(header);
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(&code);
+        frame.insert(frame.end(), p, p + sizeof(ErrorCode));
+        send_data(client_socket, frame);
+    }
+
     bool perform_handshake(intptr_t client_socket, SessionInfo& session) {
         try {
-            // Step 1: Receive handshake init
+            // Step 1: receive the client's hello.
             std::vector<uint8_t> handshake_data = receive_data(client_socket);
+            if (handshake_data.size() < sizeof(MessageHeader) + sizeof(HandshakeMessage)) {
+                LogLine(this, true) << "Handshake message too short";
+                return false;
+            }
             MessageHeader header = deserialize_header(handshake_data);
-            
             if (header.type != MessageType::HANDSHAKE_INIT) {
                 LogLine(this, true) << "Expected HANDSHAKE_INIT, got " << message_type_to_string(header.type);
                 return false;
             }
+            if (header.version != PROTOCOL_VERSION) {
+                // An older client: tell it so instead of half-working.
+                LogLine(this, false) << "Refused a client using an older protocol version";
+                send_raw_error(client_socket, ErrorCode::INVALID_PROTOCOL_VERSION);
+                return false;
+            }
 
-            // Extract handshake message
             std::vector<uint8_t> payload(handshake_data.begin() + sizeof(MessageHeader), handshake_data.end());
             HandshakeMessage client_handshake = deserialize_handshake(payload);
-
             LogLine(this, false) << "Received handshake init from client " << client_handshake.client_id;
 
-            // Step 2: Generate DH key pair for forward secrecy
-            KeyPair dh_keypair = crypto_manager_->generate_dh_keypair();
-            
-            // Step 3: Perform key exchange
-            if (client_handshake.public_key_len == 0 ||
-                client_handshake.public_key_len > MAX_PUBLIC_KEY_SIZE) {
+            if (client_handshake.public_key_len == 0 || client_handshake.public_key_len > MAX_PUBLIC_KEY_SIZE) {
                 LogLine(this, true) << "Invalid client public key length";
                 return false;
             }
 
-            std::vector<uint8_t> client_public_key_vec(client_handshake.public_key, client_handshake.public_key + client_handshake.public_key_len);
-            std::vector<uint8_t> shared_secret = crypto_manager_->perform_dh_key_exchange(
-                dh_keypair.private_key, client_public_key_vec);
-            
-            // Derive session key
-            std::vector<uint8_t> client_nonce_vec(client_handshake.nonce, client_handshake.nonce + IV_SIZE);
-            SessionKeys keys = crypto_manager_->derive_directional_keys(
-                shared_secret, client_nonce_vec, true);
+            // Step 2: ephemeral DH key and our own nonce, so both sides add randomness.
+            KeyPair dh_keypair = crypto_manager_->generate_dh_keypair();
+            if (dh_keypair.public_key.size() > MAX_PUBLIC_KEY_SIZE) {
+                LogLine(this, true) << "DH public key does not fit in handshake message";
+                return false;
+            }
+            const std::vector<uint8_t> client_key(client_handshake.public_key,
+                                                  client_handshake.public_key + client_handshake.public_key_len);
+            const std::vector<uint8_t> client_nonce(client_handshake.nonce, client_handshake.nonce + IV_SIZE);
+            const std::vector<uint8_t> server_nonce = crypto_manager_->generate_random_bytes(IV_SIZE);
 
-            // Store session keys
+            std::vector<uint8_t> shared_secret = crypto_manager_->perform_dh_key_exchange(dh_keypair.private_key, client_key);
+            std::vector<uint8_t> salt = client_nonce;
+            salt.insert(salt.end(), server_nonce.begin(), server_nonce.end());
+            SessionKeys keys = crypto_manager_->derive_directional_keys(shared_secret, salt, true);
             session_manager_->set_session_keys(session.session_id, keys);
             session.shared_secret = shared_secret;
             session.tx_key = keys.tx_key;
             session.rx_key = keys.rx_key;
 
-            // Step 4: Send handshake response
+            // Step 3: reply with our DH key and nonce, signed by our identity key.
             HandshakeMessage server_handshake{};
             server_handshake.client_id = session.client_id;
             server_handshake.session_id = session.session_id;
             server_handshake.fs_type = ForwardSecrecyType::PERFECT_FORWARD_SECRECY;
-
-            // Copy DH public key
-            if (dh_keypair.public_key.size() > MAX_PUBLIC_KEY_SIZE) {
-                LogLine(this, true) << "DH public key does not fit in handshake message";
-                return false;
-            }
             server_handshake.public_key_len = static_cast<uint16_t>(dh_keypair.public_key.size());
             std::copy(dh_keypair.public_key.begin(), dh_keypair.public_key.end(), server_handshake.public_key);
-            
-            // Copy nonce
-            std::copy(client_handshake.nonce, client_handshake.nonce + IV_SIZE, server_handshake.nonce);
+            std::copy(server_nonce.begin(), server_nonce.end(), server_handshake.nonce);
 
-            MessageHeader response_header;
-            response_header.version = ProtocolVersion::V1_0;
+            const std::vector<uint8_t> transcript =
+                handshake_transcript(session.session_id, client_key, client_nonce, dh_keypair.public_key, server_nonce);
+            const std::vector<uint8_t> signature = crypto_manager_->identity_sign(identity_, transcript);
+
+            MessageHeader response_header{};
+            response_header.version = PROTOCOL_VERSION;
             response_header.type = MessageType::HANDSHAKE_RESPONSE;
-            response_header.sequence_number = 1;
+            response_header.sequence_number = 0;
             response_header.timestamp = get_current_timestamp_seconds();
-            response_header.payload_size = sizeof(HandshakeMessage);
-            response_header.flags = 0;
+            response_header.payload_size =
+                static_cast<uint16_t>(sizeof(HandshakeMessage) + IDENTITY_KEY_SIZE + IDENTITY_SIGNATURE_SIZE);
 
             std::vector<uint8_t> response_data = serialize_header(response_header);
             std::vector<uint8_t> handshake_payload = serialize_handshake(server_handshake);
             response_data.insert(response_data.end(), handshake_payload.begin(), handshake_payload.end());
+            response_data.insert(response_data.end(), identity_.public_raw.begin(), identity_.public_raw.end());
+            response_data.insert(response_data.end(), signature.begin(), signature.end());
 
             if (!send_data(client_socket, response_data)) {
                 LogLine(this, true) << "Failed to send handshake response";
                 return false;
             }
 
-            // Step 5: Receive handshake complete
+            // Step 4: the client confirms.
             std::vector<uint8_t> complete_data = receive_data(client_socket);
+            if (complete_data.size() < sizeof(MessageHeader)) {
+                LogLine(this, true) << "Handshake confirmation missing";
+                return false;
+            }
             MessageHeader complete_header = deserialize_header(complete_data);
-            
-            if (complete_header.type != MessageType::HANDSHAKE_COMPLETE) {
+            if (complete_header.type != MessageType::HANDSHAKE_COMPLETE || complete_header.version != PROTOCOL_VERSION) {
                 LogLine(this, true) << "Expected HANDSHAKE_COMPLETE, got " << message_type_to_string(complete_header.type);
                 return false;
             }
 
-            // Authenticate session
             session_manager_->authenticate_session(session.session_id, std::vector<uint8_t>());
             session.authenticated = true;
-
             LogLine(this, false) << "Handshake completed for session " << session.session_id;
             return true;
 
@@ -403,6 +425,35 @@ struct SecureServer::Impl {
             LogLine(this, true) << "Handshake error: " << e.what();
             return false;
         }
+    }
+
+    // Opens one encrypted frame from the client: checks the version and that the
+    // sequence number is exactly the next one, then decrypts with the header bound
+    // in as associated data. Any failure means the frame was forged, replayed,
+    // reordered or altered, and the caller ends the connection.
+    bool open_frame(const std::vector<uint8_t>& frame, const std::shared_ptr<ClientConnection>& conn,
+                    std::vector<uint8_t>* plain) {
+        if (frame.size() < sizeof(MessageHeader) + sizeof(EncryptedMessage)) {
+            return false;
+        }
+        const MessageHeader header = deserialize_header(frame);
+        if (header.version != PROTOCOL_VERSION || header.sequence_number != conn->rx_seq + 1 ||
+            header.payload_size > MAX_MESSAGE_SIZE) {
+            return false;
+        }
+        std::vector<uint8_t> body(frame.begin() + sizeof(MessageHeader), frame.end());
+        EncryptedMessage msg = deserialize_encrypted_message(body);
+        std::vector<uint8_t> key = session_manager_->get_rx_key(conn->session_id);
+        std::vector<uint8_t> iv(msg.iv, msg.iv + IV_SIZE);
+        std::vector<uint8_t> cipher(msg.encrypted_data, msg.encrypted_data + header.payload_size);
+        try {
+            *plain = crypto_manager_->decrypt_aes_gcm(
+                cipher, key, iv, frame_aad(header.type, header.sequence_number, conn->session_id));
+        } catch (const std::exception&) {
+            return false;
+        }
+        conn->rx_seq = header.sequence_number;
+        return true;
     }
 
     void handle_encrypted_messages(const std::shared_ptr<ClientConnection>& conn,
@@ -419,36 +470,11 @@ struct SecureServer::Impl {
                 MessageHeader header = deserialize_header(encrypted_data);
                 
                 if (header.type == MessageType::ENCRYPTED_MESSAGE) {
-                    // Extract encrypted message
-                    std::vector<uint8_t> payload(encrypted_data.begin() + sizeof(MessageHeader), encrypted_data.end());
-                    EncryptedMessage encrypted_msg = deserialize_encrypted_message(payload);
-
-                    // Verify session
-                    AuthResult auth_result = session_manager_->verify_session_auth(session.session_id, 
-                                                                                  std::vector<uint8_t>(encrypted_msg.signature, 
-                                                                                                      encrypted_msg.signature + SIGNATURE_SIZE));
-                    if (auth_result != AuthResult::SUCCESS) {
-                        LogLine(this, true) << "Authentication failed: " << static_cast<int>(auth_result);
-                        send_error(conn, ErrorCode::AUTHENTICATION_FAILED);
+                    std::vector<uint8_t> decrypted_data;
+                    if (!open_frame(encrypted_data, conn, &decrypted_data)) {
+                        LogLine(this, false) << "Dropped a client after a frame that failed its integrity check";
                         break;
                     }
-
-                    // payload_size comes off the wire; without this check it would
-                    // read past the end of encrypted_data.
-                    if (header.payload_size > MAX_MESSAGE_SIZE) {
-                        LogLine(this, true) << "Encrypted payload size out of range";
-                        send_error(conn, ErrorCode::INVALID_MESSAGE);
-                        break;
-                    }
-
-                    // Decrypt message
-                    std::vector<uint8_t> key = session_manager_->get_rx_key(session.session_id);
-                    std::vector<uint8_t> iv(encrypted_msg.iv, encrypted_msg.iv + IV_SIZE);
-                    
-                    std::vector<uint8_t> decrypted_data = crypto_manager_->decrypt_aes_gcm(
-                        std::vector<uint8_t>(encrypted_msg.encrypted_data, 
-                                           encrypted_msg.encrypted_data + header.payload_size),
-                        key, iv);
 
                     ChatMessage chat = deserialize_chat(decrypted_data);
 
@@ -543,7 +569,14 @@ struct SecureServer::Impl {
                     send_notice(conn, "Unsupported message type");
 
                 } else if (header.type == MessageType::KEY_ROTATION) {
-                    // The client has rotated the direction it sends on.
+                    // The client is rotating the direction it sends on. The marker is
+                    // encrypted under the old key, so nobody else can trigger it.
+                    std::vector<uint8_t> marker;
+                    if (!open_frame(encrypted_data, conn, &marker) ||
+                        std::string(marker.begin(), marker.end()) != ROTATION_MARKER) {
+                        LogLine(this, false) << "Dropped a client after a key rotation that failed its integrity check";
+                        break;
+                    }
                     session_manager_->rotate_rx_key(session.session_id);
                     LogLine(this, false) << "Client rotated its send key for session " << session.session_id;
 
@@ -612,37 +645,10 @@ struct SecureServer::Impl {
             return;
         }
         try {
-            std::vector<uint8_t> tx = session_manager_->get_tx_key(conn->session_id);
-            std::vector<uint8_t> iv = crypto_manager_->generate_random_bytes(IV_SIZE);
-            std::vector<uint8_t> cipher =
-                crypto_manager_->encrypt_aes_gcm(serialize_chat(msg), tx, iv);
-
-            if (cipher.size() > MAX_MESSAGE_SIZE) {
+            std::vector<uint8_t> frame = seal_frame(conn, MessageType::ENCRYPTED_MESSAGE, serialize_chat(msg));
+            if (frame.empty()) {
                 return;
             }
-
-            EncryptedMessage out{};
-            out.session_id = conn->session_id;
-            out.message_id = 0;
-            std::copy(iv.begin(), iv.end(), out.iv);
-            std::copy(cipher.begin(), cipher.end(), out.encrypted_data);
-
-            std::vector<uint8_t> signature =
-                crypto_manager_->sign_data(cipher, server_keypair_.private_key);
-            const size_t sig_len = std::min<size_t>(signature.size(), SIGNATURE_SIZE);
-            std::copy(signature.begin(), signature.begin() + sig_len, out.signature);
-
-            MessageHeader header{};
-            header.version = ProtocolVersion::V1_0;
-            header.type = MessageType::ENCRYPTED_MESSAGE;
-            header.sequence_number = 0;
-            header.timestamp = get_current_timestamp_seconds();
-            header.payload_size = static_cast<uint16_t>(cipher.size());
-            header.flags = 0;
-
-            std::vector<uint8_t> frame = serialize_header(header);
-            std::vector<uint8_t> body = serialize_encrypted_message(out);
-            frame.insert(frame.end(), body.begin(), body.end());
 
             if (!send_data(conn->socket, frame)) {
                 conn->alive = false;
@@ -652,7 +658,7 @@ struct SecureServer::Impl {
             // Rotating here, under send_mutex, means no other relaying thread can
             // encrypt with the old key and send after the marker has gone out.
             if (++conn->sent_count % KEY_ROTATION_INTERVAL == 0) {
-                if (!rotate_tx_and_announce(conn->socket, conn->session_id)) {
+                if (!rotate_tx_and_announce(conn)) {
                     conn->alive = false;
                     return;
                 }
@@ -686,19 +692,49 @@ struct SecureServer::Impl {
     // peer rotates its rx key when it reads the frame, so both switch at the same
     // point in the stream and neither direction disturbs the other. The caller must
     // hold the connection's send_mutex.
-    bool rotate_tx_and_announce(intptr_t client_socket, uint32_t session_id) {
-        MessageHeader header{};
-        header.version = ProtocolVersion::V1_0;
-        header.type = MessageType::KEY_ROTATION;
-        header.sequence_number = 0;
-        header.timestamp = get_current_timestamp_seconds();
-        header.payload_size = 0;
-        header.flags = 0;
+    // Builds one encrypted frame with the next sequence number and the header
+    // bound in as associated data. The caller holds conn->send_mutex.
+    std::vector<uint8_t> seal_frame(const std::shared_ptr<ClientConnection>& conn, MessageType type,
+                                    const std::vector<uint8_t>& plain) {
+        const uint32_t seq = conn->tx_seq + 1;
+        std::vector<uint8_t> tx = session_manager_->get_tx_key(conn->session_id);
+        std::vector<uint8_t> iv = crypto_manager_->generate_random_bytes(IV_SIZE);
+        std::vector<uint8_t> cipher =
+            crypto_manager_->encrypt_aes_gcm(plain, tx, iv, frame_aad(type, seq, conn->session_id));
+        if (cipher.size() > MAX_MESSAGE_SIZE) {
+            return {};
+        }
+        EncryptedMessage out{};
+        out.session_id = conn->session_id;
+        out.message_id = seq;
+        std::copy(iv.begin(), iv.end(), out.iv);
+        std::copy(cipher.begin(), cipher.end(), out.encrypted_data);
 
-        if (!send_data(client_socket, serialize_header(header))) {
+        MessageHeader header{};
+        header.version = PROTOCOL_VERSION;
+        header.type = type;
+        header.sequence_number = seq;
+        header.timestamp = get_current_timestamp_seconds();
+        header.payload_size = static_cast<uint16_t>(cipher.size());
+
+        std::vector<uint8_t> frame = serialize_header(header);
+        std::vector<uint8_t> body = serialize_encrypted_message(out);
+        frame.insert(frame.end(), body.begin(), body.end());
+        conn->tx_seq = seq;
+        return frame;
+    }
+
+    // Announces that this side is rotating the key it sends with. The marker is
+    // an encrypted frame under the current key, so the client can tell it really
+    // came from us; the key changes right after it. The caller holds send_mutex.
+    bool rotate_tx_and_announce(const std::shared_ptr<ClientConnection>& conn) {
+        const std::string marker = ROTATION_MARKER;
+        std::vector<uint8_t> frame =
+            seal_frame(conn, MessageType::KEY_ROTATION, std::vector<uint8_t>(marker.begin(), marker.end()));
+        if (frame.empty() || !send_data(conn->socket, frame)) {
             return false;
         }
-        session_manager_->rotate_tx_key(session_id);
+        session_manager_->rotate_tx_key(conn->session_id);
         return true;
     }
 
@@ -706,7 +742,7 @@ struct SecureServer::Impl {
     // frame another thread is relaying to the same socket.
     void send_error(const std::shared_ptr<ClientConnection>& conn, ErrorCode error_code) {
         MessageHeader header;
-        header.version = ProtocolVersion::V1_0;
+        header.version = PROTOCOL_VERSION;
         header.type = MessageType::ERROR_MESSAGE;
         header.sequence_number = 0;
         header.timestamp = get_current_timestamp_seconds();

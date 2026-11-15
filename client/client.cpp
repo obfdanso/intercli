@@ -1,6 +1,7 @@
 // Terminal chat client: a console front end over SecureComm::ChatClient.
 
 #include "chat_client.h"
+#include "../crypto/crypto_utils.h"
 #include <chrono>
 #include <condition_variable>
 #include <iostream>
@@ -29,6 +30,8 @@ public:
             std::cerr << error << std::endl;
             return false;
         }
+        // People can read this out to each other to check nobody is in between.
+        std::cout << "Server safety code: " << SecureComm::safety_code(client_.server_identity()) << std::endl;
         return true;
     }
 
@@ -207,12 +210,10 @@ int main(int argc, char* argv[]) {
 
         std::cout << "Secure Communication Client" << std::endl;
         std::cout << "Features:" << std::endl;
-        std::cout << "- RSA-2048 key exchange" << std::endl;
-        std::cout << "- AES-256-GCM encryption" << std::endl;
-        std::cout << "- Perfect Forward Secrecy with DH key exchange" << std::endl;
-        std::cout << "- Session authentication" << std::endl;
+        std::cout << "- Diffie-Hellman key exchange (new keys for every connection)" << std::endl;
+        std::cout << "- Server identity proven with an Ed25519 signature" << std::endl;
+        std::cout << "- AES-256-GCM encryption, with altered or replayed messages rejected" << std::endl;
         std::cout << "- Manual key rotation" << std::endl;
-        std::cout << "- Digital signatures" << std::endl;
 
         client.interactive_mode();
 

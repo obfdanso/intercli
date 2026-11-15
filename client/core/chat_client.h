@@ -57,6 +57,13 @@ public:
     ChatClient(const ChatClient&) = delete;
     ChatClient& operator=(const ChatClient&) = delete;
 
+    // The server identity key this chat is known to have (from an earlier
+    // join). If set, connect() refuses a server that proves a different one,
+    // before anything else is sent. Empty: accept any identity.
+    void set_expected_identity(std::vector<uint8_t> public_raw);
+    // The identity key the server proved in the last successful handshake.
+    std::vector<uint8_t> server_identity() const;
+
     // Blocking: resolves the host, connects, runs the handshake and starts the
     // receive thread. On failure returns false and, if error is given, a reason.
     bool connect(const std::string& host, uint16_t port, std::string* error);
@@ -93,6 +100,8 @@ public:
 private:
     bool send_chat(const ChatMessage& chat);
     bool rotate_locked();
+    std::vector<uint8_t> seal_frame(MessageType type, const std::vector<uint8_t>& plain);
+    bool open_frame(const std::vector<uint8_t>& frame, std::vector<uint8_t>* plain);
     bool perform_handshake(std::string* error);
     bool connect_socket(const std::string& host, uint16_t port, std::string* error);
     void set_receive_timeout(int ms);
@@ -111,7 +120,6 @@ private:
 
     ChatEvents events_;
     std::unique_ptr<CryptoManager> crypto_;
-    KeyPair client_keypair_;
     KeyPair dh_keypair_;
     SessionInfo session_;
 
@@ -125,6 +133,7 @@ private:
     mutable std::mutex send_mutex_;
     std::vector<uint8_t> tx_key_;
     uint32_t message_counter_ = 0;
+    uint32_t tx_seq_ = 0;  // last frame number sent
     uint32_t send_rotations_ = 0;
     std::optional<std::chrono::system_clock::time_point> last_send_rotation_;
 
@@ -132,6 +141,10 @@ private:
     mutable std::mutex rx_mutex_;
     std::vector<uint8_t> rx_key_;
     uint32_t receive_rotations_ = 0;
+    uint32_t rx_seq_ = 0;  // last frame number received; receive thread only
+
+    std::vector<uint8_t> expected_identity_;
+    std::vector<uint8_t> server_identity_;
 };
 
 // Parses the server's "Online (N): a, b, c" reply. Names never contain spaces,

@@ -68,7 +68,7 @@ constexpr int kHandshakeTimeoutMs = 10000;
 
 MessageHeader make_header(MessageType type, uint32_t sequence, uint16_t payload_size) {
     MessageHeader header{};
-    header.version = ProtocolVersion::V1_0;
+    header.version = PROTOCOL_VERSION;
     header.type = type;
     header.sequence_number = sequence;
     header.timestamp = get_current_timestamp_seconds();
@@ -140,15 +140,6 @@ bool ChatClient::connect(const std::string& host, uint16_t port, std::string* er
         return false;
     };
 
-    try {
-        if (client_keypair_.private_key.empty()) {
-            client_keypair_ = crypto_->generate_rsa_keypair(2048);
-            log("Client RSA key pair generated successfully");
-        }
-    } catch (const std::exception& e) {
-        return fail(std::string("Key generation failed: ") + e.what());
-    }
-
     if (cancelled_) {
         return fail("Cancelled");
     }
@@ -168,6 +159,9 @@ bool ChatClient::connect(const std::string& host, uint16_t port, std::string* er
             const std::string where = host + ":" + std::to_string(port);
             if (cancelled_) {
                 *error = "Cancelled";
+            } else if (handshake_error.rfind("This chat's identity", 0) == 0 ||
+                       handshake_error.rfind("The other side uses", 0) == 0) {
+                *error = handshake_error;
             } else if (handshake_error == "No handshake response received") {
                 *error = "The server at " + where + " didn't answer";
             } else {
@@ -357,6 +351,14 @@ bool ChatClient::keepalive_enabled() const {
     return on != 0;
 }
 
+void ChatClient::set_expected_identity(std::vector<uint8_t> public_raw) {
+    expected_identity_ = std::move(public_raw);
+}
+
+std::vector<uint8_t> ChatClient::server_identity() const {
+    return server_identity_;
+}
+
 bool ChatClient::connected() const {
     return connected_;
 }
@@ -429,28 +431,10 @@ bool ChatClient::send_chat(const ChatMessage& chat) {
     {
         std::lock_guard<std::mutex> lock(send_mutex_);
         try {
-            std::vector<uint8_t> message_data = serialize_chat(chat);
-            std::vector<uint8_t> iv = crypto_->generate_random_bytes(IV_SIZE);
-            std::vector<uint8_t> encrypted_data = crypto_->encrypt_aes_gcm(message_data, tx_key_, iv);
-            if (encrypted_data.size() > MAX_MESSAGE_SIZE) {
+            std::vector<uint8_t> request_data = seal_frame(MessageType::ENCRYPTED_MESSAGE, serialize_chat(chat));
+            if (request_data.empty()) {
                 return false;
             }
-
-            EncryptedMessage encrypted_msg{};
-            encrypted_msg.session_id = session_.session_id;
-            encrypted_msg.message_id = message_counter_;
-            std::copy(iv.begin(), iv.begin() + std::min<size_t>(iv.size(), IV_SIZE), encrypted_msg.iv);
-            std::copy(encrypted_data.begin(), encrypted_data.end(), encrypted_msg.encrypted_data);
-
-            std::vector<uint8_t> signature = crypto_->sign_data(encrypted_data, client_keypair_.private_key);
-            std::copy(signature.begin(), signature.begin() + std::min<size_t>(signature.size(), SIGNATURE_SIZE),
-                      encrypted_msg.signature);
-
-            MessageHeader header = make_header(MessageType::ENCRYPTED_MESSAGE, message_counter_,
-                                               static_cast<uint16_t>(encrypted_data.size()));
-            std::vector<uint8_t> request_data = serialize_header(header);
-            std::vector<uint8_t> payload = serialize_encrypted_message(encrypted_msg);
-            request_data.insert(request_data.end(), payload.begin(), payload.end());
 
             if (!send_data(request_data)) {
                 log("Failed to send encrypted message");
@@ -482,8 +466,10 @@ bool ChatClient::send_chat(const ChatMessage& chat) {
 // point in the stream. The caller holds send_mutex_.
 bool ChatClient::rotate_locked() {
     try {
-        MessageHeader header = make_header(MessageType::KEY_ROTATION, message_counter_, 0);
-        if (!send_data(serialize_header(header))) {
+        const std::string marker = ROTATION_MARKER;
+        std::vector<uint8_t> frame =
+            seal_frame(MessageType::KEY_ROTATION, std::vector<uint8_t>(marker.begin(), marker.end()));
+        if (frame.empty() || !send_data(frame)) {
             log("Failed to send key rotation marker");
             return false;
         }
@@ -495,6 +481,60 @@ bool ChatClient::rotate_locked() {
         log(std::string("Key rotation failed: ") + e.what());
         return false;
     }
+}
+
+// One encrypted frame with the next sequence number and the header bound in as
+// associated data. The caller holds send_mutex_.
+std::vector<uint8_t> ChatClient::seal_frame(MessageType type, const std::vector<uint8_t>& plain) {
+    const uint32_t seq = tx_seq_ + 1;
+    std::vector<uint8_t> iv = crypto_->generate_random_bytes(IV_SIZE);
+    std::vector<uint8_t> cipher =
+        crypto_->encrypt_aes_gcm(plain, tx_key_, iv, frame_aad(type, seq, session_.session_id));
+    if (cipher.size() > MAX_MESSAGE_SIZE) {
+        return {};
+    }
+    EncryptedMessage msg{};
+    msg.session_id = session_.session_id;
+    msg.message_id = seq;
+    std::copy(iv.begin(), iv.end(), msg.iv);
+    std::copy(cipher.begin(), cipher.end(), msg.encrypted_data);
+
+    MessageHeader header = make_header(type, seq, static_cast<uint16_t>(cipher.size()));
+    std::vector<uint8_t> frame = serialize_header(header);
+    std::vector<uint8_t> body = serialize_encrypted_message(msg);
+    frame.insert(frame.end(), body.begin(), body.end());
+    tx_seq_ = seq;
+    return frame;
+}
+
+// Checks the version and that the frame is exactly the next one, then decrypts
+// with the header bound in. False means forged, replayed, reordered or altered.
+bool ChatClient::open_frame(const std::vector<uint8_t>& frame, std::vector<uint8_t>* plain) {
+    if (frame.size() < sizeof(MessageHeader) + sizeof(EncryptedMessage)) {
+        return false;
+    }
+    const MessageHeader header = deserialize_header(frame);
+    if (header.version != PROTOCOL_VERSION || header.sequence_number != rx_seq_ + 1 ||
+        header.payload_size > MAX_MESSAGE_SIZE) {
+        return false;
+    }
+    std::vector<uint8_t> body(frame.begin() + sizeof(MessageHeader), frame.end());
+    EncryptedMessage msg = deserialize_encrypted_message(body);
+    std::vector<uint8_t> rx;
+    {
+        std::lock_guard<std::mutex> lock(rx_mutex_);
+        rx = rx_key_;
+    }
+    std::vector<uint8_t> iv(msg.iv, msg.iv + IV_SIZE);
+    std::vector<uint8_t> cipher(msg.encrypted_data, msg.encrypted_data + header.payload_size);
+    try {
+        *plain = crypto_->decrypt_aes_gcm(cipher, rx, iv,
+                                          frame_aad(header.type, header.sequence_number, session_.session_id));
+    } catch (const std::exception&) {
+        return false;
+    }
+    rx_seq_ = header.sequence_number;
+    return true;
 }
 
 void ChatClient::report_lost(const std::string& reason) {
@@ -547,7 +587,12 @@ void ChatClient::dispatch_frame(const std::vector<uint8_t>& data) {
     MessageHeader header = deserialize_header(data);
 
     if (header.type == MessageType::KEY_ROTATION) {
-        // The server has rotated the direction it sends on.
+        // The server is rotating the direction it sends on. The marker is
+        // encrypted under the old key, so nobody else can trigger it.
+        std::vector<uint8_t> marker;
+        if (!open_frame(data, &marker) || std::string(marker.begin(), marker.end()) != ROTATION_MARKER) {
+            throw std::runtime_error("A key rotation failed its integrity check");
+        }
         {
             std::lock_guard<std::mutex> lock(rx_mutex_);
             rx_key_ = crypto_->rotate_session_key(rx_key_, session_id_bytes());
@@ -575,24 +620,10 @@ void ChatClient::dispatch_frame(const std::vector<uint8_t>& data) {
         return;
     }
 
-    // payload_size comes off the wire; without this check it would read past
-    // the end of encrypted_data.
-    if (header.payload_size > MAX_MESSAGE_SIZE) {
-        throw std::runtime_error("Encrypted payload size out of range");
+    std::vector<uint8_t> plain;
+    if (!open_frame(data, &plain)) {
+        throw std::runtime_error("A message failed its integrity check");
     }
-
-    std::vector<uint8_t> payload(data.begin() + sizeof(MessageHeader), data.end());
-    EncryptedMessage msg = deserialize_encrypted_message(payload);
-
-    std::vector<uint8_t> rx;
-    {
-        std::lock_guard<std::mutex> lock(rx_mutex_);
-        rx = rx_key_;
-    }
-
-    std::vector<uint8_t> iv(msg.iv, msg.iv + IV_SIZE);
-    std::vector<uint8_t> cipher(msg.encrypted_data, msg.encrypted_data + header.payload_size);
-    std::vector<uint8_t> plain = crypto_->decrypt_aes_gcm(cipher, rx, iv);
 
     handle_chat(deserialize_chat(plain));
 }
@@ -638,8 +669,7 @@ bool ChatClient::perform_handshake(std::string* error) {
         handshake.session_id = session_.session_id;
         handshake.fs_type = ForwardSecrecyType::PERFECT_FORWARD_SECRECY;
 
-        // The long-lived RSA key signs messages; the key exchange needs an
-        // ephemeral DH key of the same group as the server's.
+        // An ephemeral DH key of the same group as the server's.
         dh_keypair_ = crypto_->generate_dh_keypair();
         if (dh_keypair_.public_key.size() > MAX_PUBLIC_KEY_SIZE) {
             return fail("DH public key does not fit in handshake message");
@@ -672,12 +702,30 @@ bool ChatClient::perform_handshake(std::string* error) {
         }
 
         MessageHeader response_header = deserialize_header(response_data);
+        const std::string older = "The other side uses an older version of intercli; please update";
+        if (response_header.type == MessageType::ERROR_MESSAGE && response_data.size() >= sizeof(MessageHeader) + 2) {
+            ErrorCode code;
+            std::memcpy(&code, response_data.data() + sizeof(MessageHeader), sizeof(code));
+            if (code == ErrorCode::INVALID_PROTOCOL_VERSION) {
+                return fail(older);
+            }
+        }
+        if (response_header.version != PROTOCOL_VERSION) {
+            return fail(older);
+        }
         if (response_header.type != MessageType::HANDSHAKE_RESPONSE) {
             return fail("Expected HANDSHAKE_RESPONSE, got " + message_type_to_string(response_header.type));
         }
 
         std::vector<uint8_t> payload(response_data.begin() + sizeof(MessageHeader), response_data.end());
+        if (payload.size() < sizeof(HandshakeMessage) + IDENTITY_KEY_SIZE + IDENTITY_SIGNATURE_SIZE) {
+            return fail("Handshake response too short");
+        }
         HandshakeMessage server_handshake = deserialize_handshake(payload);
+        const auto proof = payload.begin() + sizeof(HandshakeMessage);
+        const std::vector<uint8_t> identity(proof, proof + IDENTITY_KEY_SIZE);
+        const std::vector<uint8_t> signature(proof + IDENTITY_KEY_SIZE,
+                                             proof + IDENTITY_KEY_SIZE + IDENTITY_SIGNATURE_SIZE);
         log("Received handshake response from server");
 
         // The server owns the session identity. Adopt it, because the session id is
@@ -694,16 +742,34 @@ bool ChatClient::perform_handshake(std::string* error) {
             crypto_->perform_dh_key_exchange(dh_keypair_.private_key, server_public_key);
 
         std::vector<uint8_t> server_nonce(server_handshake.nonce, server_handshake.nonce + IV_SIZE);
-        SessionKeys keys = crypto_->derive_directional_keys(shared_secret, server_nonce, false);
+
+        // The server proves who it is: its identity key signed this exact
+        // exchange. Checked before any key is used or anything else is sent.
+        const std::vector<uint8_t> transcript =
+            handshake_transcript(session_.session_id, dh_keypair_.public_key, nonce, server_public_key, server_nonce);
+        if (!crypto_->identity_verify(identity, transcript, signature)) {
+            return fail("The server could not prove its identity");
+        }
+        if (!expected_identity_.empty() && identity != expected_identity_) {
+            return fail("This chat's identity has changed. If you didn't expect this, someone may be "
+                        "intercepting the connection.");
+        }
+        server_identity_ = identity;
+
+        std::vector<uint8_t> salt = nonce;
+        salt.insert(salt.end(), server_nonce.begin(), server_nonce.end());
+        SessionKeys keys = crypto_->derive_directional_keys(shared_secret, salt, false);
         {
             std::lock_guard<std::mutex> lock(send_mutex_);
             tx_key_ = keys.tx_key;
+            tx_seq_ = 0;
         }
         {
             std::lock_guard<std::mutex> lock(rx_mutex_);
             rx_key_ = keys.rx_key;
             receive_rotations_ = 0;
         }
+        rx_seq_ = 0;
         session_.shared_secret = shared_secret;
         session_.authenticated = true;
         log("Session key derived successfully");

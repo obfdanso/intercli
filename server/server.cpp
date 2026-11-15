@@ -48,12 +48,10 @@ int main() {
 
         std::cout << "Secure Communication Server" << std::endl;
         std::cout << "Features:" << std::endl;
-        std::cout << "- RSA-2048 key exchange" << std::endl;
-        std::cout << "- AES-256-GCM encryption" << std::endl;
-        std::cout << "- Perfect Forward Secrecy with DH key exchange" << std::endl;
-        std::cout << "- Session authentication" << std::endl;
+        std::cout << "- Diffie-Hellman key exchange (new keys for every connection)" << std::endl;
+        std::cout << "- Server identity proven with an Ed25519 signature" << std::endl;
+        std::cout << "- AES-256-GCM encryption, with altered or replayed messages rejected" << std::endl;
         std::cout << "- Automatic key rotation" << std::endl;
-        std::cout << "- Digital signatures" << std::endl;
         std::cout << "Press Ctrl+C to stop" << std::endl;
 
         std::thread runner([&server] { server.run(); });

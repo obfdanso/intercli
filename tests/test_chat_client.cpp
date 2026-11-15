@@ -2,6 +2,7 @@
 
 #include "chat_client.h"
 #include "silent_server.h"
+#include "frame_proxy.h"
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -116,6 +117,53 @@ static bool contains_prefix(Recorder& r, const std::string& prefix) {
     return r.count_prefix(prefix) > 0;
 }
 
+// Speaks protocol version 1 to the server: it must answer with an error frame
+// and close, not carry on.
+static bool old_version_hello_is_refused() {
+#ifdef _WIN32
+    using sock = SOCKET;
+#else
+    using sock = int;
+#endif
+    sock s = socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(DEFAULT_PORT);
+    if (connect(s, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) return false;
+
+    MessageHeader h{};
+    h.version = ProtocolVersion::V1_0;
+    h.type = MessageType::HANDSHAKE_INIT;
+    h.payload_size = sizeof(HandshakeMessage);
+    std::vector<uint8_t> frame = serialize_header(h);
+    HandshakeMessage hs{};
+    std::vector<uint8_t> body = serialize_handshake(hs);
+    frame.insert(frame.end(), body.begin(), body.end());
+    const uint32_t be = htonl(static_cast<uint32_t>(frame.size()));
+    send(s, reinterpret_cast<const char*>(&be), 4, 0);
+    send(s, reinterpret_cast<const char*>(frame.data()), static_cast<int>(frame.size()), 0);
+
+    uint32_t len_be = 0;
+    bool error_frame = false;
+    if (recv(s, reinterpret_cast<char*>(&len_be), 4, MSG_WAITALL) == 4) {
+        std::vector<uint8_t> reply(ntohl(len_be));
+        if (!reply.empty() && recv(s, reinterpret_cast<char*>(reply.data()), static_cast<int>(reply.size()),
+                                   MSG_WAITALL) == static_cast<int>(reply.size()) &&
+            reply.size() >= sizeof(MessageHeader)) {
+            error_frame = deserialize_header(reply).type == MessageType::ERROR_MESSAGE;
+        }
+    }
+    char byte;
+    const bool closed = recv(s, &byte, 1, 0) <= 0;
+#ifdef _WIN32
+    closesocket(s);
+#else
+    close(s);
+#endif
+    return error_frame && closed;
+}
+
 int main() {
     Recorder alice_log;
     Recorder bob_log;
@@ -225,6 +273,85 @@ int main() {
         check(bob_log.disconnected == 0, "user disconnect does not report a lost connection");
     }
     check(!bob.connected(), "bob reports disconnected");
+
+    std::cout << "Server identity" << std::endl;
+    check(alice.server_identity().size() == 32, "the server proves a 32-byte identity key");
+    {
+        Recorder log;
+        ChatClient wary(log.make_events());
+        std::vector<uint8_t> wrong = alice.server_identity();
+        wrong[0] ^= 0xFF;
+        wary.set_expected_identity(wrong);
+        std::string err;
+        check(!wary.connect("127.0.0.1", DEFAULT_PORT, &err), "a different identity than expected is refused");
+        check(err.find("identity has changed") != std::string::npos, "the refusal says the identity changed");
+        ChatClient trusting(log.make_events());
+        trusting.set_expected_identity(alice.server_identity());
+        check(trusting.connect("127.0.0.1", DEFAULT_PORT, &err), "the expected identity is accepted");
+    }
+
+    std::cout << "Tampered frame" << std::endl;
+    {
+        FrameProxy proxy(DEFAULT_PORT);
+        Recorder log;
+        ChatClient carol2(log.make_events());
+        std::string err;
+        check(carol2.connect("127.0.0.1", proxy.port(), &err), "a client connects through the proxy");
+        carol2.request_name("tamper");
+        check(log.wait_event("registered:tamper"), "it registers through the proxy");
+        check(alice_log.wait_event("presence:tamper:joined"), "alice sees it join");
+        proxy.tamper_next_to_server();
+        carol2.send_broadcast("altered on the way");
+        check(alice_log.wait_event("presence:tamper:left"), "the server drops a client whose frame was altered");
+        check(!alice_log.has("broadcast:tamper:altered on the way"), "the altered message is not relayed");
+    }
+
+    std::cout << "Replayed frame" << std::endl;
+    {
+        FrameProxy proxy(DEFAULT_PORT);
+        Recorder log;
+        ChatClient replayer(log.make_events());
+        std::string err;
+        check(replayer.connect("127.0.0.1", proxy.port(), &err), "a client connects through the proxy");
+        replayer.request_name("replay");
+        check(log.wait_event("registered:replay"), "it registers");
+        replayer.send_broadcast("only once");
+        check(alice_log.wait_event("broadcast:replay:only once"), "the message arrives");
+        proxy.replay_last_to_server();
+        check(alice_log.wait_event("presence:replay:left"), "the server drops a client whose frame was replayed");
+        check(alice_log.count_prefix("broadcast:replay:only once") == 1, "the replayed message is not relayed twice");
+    }
+
+    std::cout << "Injected key rotation" << std::endl;
+    {
+        FrameProxy proxy(DEFAULT_PORT);
+        Recorder log;
+        ChatClient victim(log.make_events());
+        std::string err;
+        check(victim.connect("127.0.0.1", proxy.port(), &err), "a client connects through the proxy");
+        victim.request_name("victim");
+        check(log.wait_event("registered:victim"), "it registers");
+        proxy.inject_rotation_to_client();
+        check(log.wait_for([&] { std::lock_guard<std::mutex> l(log.mutex); return log.disconnected > 0; }),
+              "a forged rotation ends the connection instead of silently changing keys");
+    }
+
+    std::cout << "Truncated frame" << std::endl;
+    {
+        FrameProxy proxy(DEFAULT_PORT);
+        Recorder log;
+        ChatClient victim(log.make_events());
+        std::string err;
+        check(victim.connect("127.0.0.1", proxy.port(), &err), "a client connects through the proxy");
+        victim.request_name("short");
+        check(log.wait_event("registered:short"), "it registers");
+        proxy.truncate_to_client();
+        check(log.wait_for([&] { std::lock_guard<std::mutex> l(log.mutex); return log.disconnected > 0; }),
+              "a frame too short for a header ends the connection without crashing");
+    }
+
+    std::cout << "Old protocol version" << std::endl;
+    check(old_version_hello_is_refused(), "a version 1 hello gets an error and the connection closes");
 
     std::cout << "Long recipient name" << std::endl;
     {

@@ -58,8 +58,17 @@ enum class MessageType : uint8_t {
 
 // Protocol versions
 enum class ProtocolVersion : uint8_t {
-    V1_0 = 0x01
+    V1_0 = 0x01,
+    // Version 2: the server signs the handshake with its identity key, every
+    // encrypted frame binds its header into AES-GCM and must arrive in sequence,
+    // and key rotations are encrypted frames.
+    V2_0 = 0x02
 };
+
+constexpr ProtocolVersion PROTOCOL_VERSION = ProtocolVersion::V2_0;
+constexpr size_t IDENTITY_KEY_SIZE = 32;        // Ed25519 public key
+constexpr size_t IDENTITY_SIGNATURE_SIZE = 64;  // Ed25519 signature
+constexpr char ROTATION_MARKER[] = "ROTATE";
 
 // Forward secrecy types
 enum class ForwardSecrecyType : uint8_t {
@@ -120,7 +129,6 @@ struct EncryptedMessage {
     uint32_t message_id;
     uint8_t iv[IV_SIZE];
     uint8_t encrypted_data[MAX_MESSAGE_SIZE];
-    uint8_t signature[SIGNATURE_SIZE];
 };
 
 // Session information
@@ -353,6 +361,40 @@ inline ChatMessage deserialize_chat(const std::vector<uint8_t>& data) {
         throw std::runtime_error("Chat text_len out of range");
     }
     return msg;
+}
+
+// What AES-GCM authenticates alongside every encrypted frame: the protocol
+// version, frame type, sequence number and session. Changing, replaying or
+// reordering a frame makes decryption fail.
+inline std::vector<uint8_t> frame_aad(MessageType type, uint32_t sequence, uint32_t session_id) {
+    std::vector<uint8_t> aad;
+    aad.push_back(static_cast<uint8_t>(PROTOCOL_VERSION));
+    aad.push_back(static_cast<uint8_t>(type));
+    for (int i = 0; i < 4; ++i) aad.push_back(static_cast<uint8_t>(sequence >> (8 * i)));
+    for (int i = 0; i < 4; ++i) aad.push_back(static_cast<uint8_t>(session_id >> (8 * i)));
+    return aad;
+}
+
+// What the server signs in its handshake response, so the client knows the DH
+// keys and nonces it is about to use came from the server's identity key.
+inline std::vector<uint8_t> handshake_transcript(uint32_t session_id,
+                                                 const std::vector<uint8_t>& client_key,
+                                                 const std::vector<uint8_t>& client_nonce,
+                                                 const std::vector<uint8_t>& server_key,
+                                                 const std::vector<uint8_t>& server_nonce) {
+    const std::string label = "intercli-handshake-v2";
+    std::vector<uint8_t> t(label.begin(), label.end());
+    for (int i = 0; i < 4; ++i) t.push_back(static_cast<uint8_t>(session_id >> (8 * i)));
+    auto add = [&t](const std::vector<uint8_t>& v) {
+        t.push_back(static_cast<uint8_t>(v.size()));
+        t.push_back(static_cast<uint8_t>(v.size() >> 8));
+        t.insert(t.end(), v.begin(), v.end());
+    };
+    add(client_key);
+    add(client_nonce);
+    add(server_key);
+    add(server_nonce);
+    return t;
 }
 
 } // namespace SecureComm
