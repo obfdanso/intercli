@@ -212,6 +212,15 @@ Rectangle {
                         color: Theme.textSecondary
                         font.pixelSize: 12
                     }
+                    Text {
+                        textFormat: Text.PlainText
+                        visible: Chat.hostAddress.length > 0
+                        width: parent.width
+                        wrapMode: Text.Wrap
+                        text: "For Join by address: " + Chat.hostAddress
+                        color: Theme.textTertiary
+                        font.pixelSize: 11
+                    }
                 }
             }
 

@@ -57,6 +57,8 @@ class ChatController : public QObject {
     Q_PROPERTY(bool firewallNoteNeeded READ firewallNoteNeeded NOTIFY hostingChanged)
     // After "This chat's identity has changed": the safety code it has now.
     Q_PROPERTY(bool identityChanged READ identityChanged NOTIFY errorsChanged)
+    // Where others can reach this PC's chat ("192.168.1.20:8080"), for Join by address.
+    Q_PROPERTY(QString hostAddress READ hostAddress NOTIFY hostingChanged)
     Q_PROPERTY(QString newSafetyCode READ newSafetyCode NOTIFY errorsChanged)
 
 public:
@@ -101,6 +103,7 @@ public:
     bool publicNetwork() const { return public_network_; }
     bool firewallNoteNeeded() const;
     bool identityChanged() const { return identity_changed_; }
+    QString hostAddress() const;
     QString newSafetyCode() const;
     QString historyIdentityForTests() const { return identity_; }
 

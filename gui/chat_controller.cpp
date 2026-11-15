@@ -7,6 +7,7 @@
 #include <QDateTime>
 #include <QSettings>
 #include <QClipboard>
+#include <QNetworkInterface>
 #include <QGuiApplication>
 #include <QTimer>
 
@@ -538,6 +539,26 @@ void ChatController::setWindowActive(bool active) {
 void ChatController::clearErrors() {
     identity_changed_ = false;
     setErrors(QString(), QString());
+}
+
+QString ChatController::hostAddress() const {
+    if (!hosting_ || !host_session_ || host_session_->port() == 0) {
+        return QString();
+    }
+    QStringList addresses;
+    for (const QNetworkInterface& iface : QNetworkInterface::allInterfaces()) {
+        const auto flags = iface.flags();
+        if (!(flags & QNetworkInterface::IsUp) || !(flags & QNetworkInterface::IsRunning) ||
+            (flags & QNetworkInterface::IsLoopBack)) {
+            continue;
+        }
+        for (const QNetworkAddressEntry& entry : iface.addressEntries()) {
+            if (entry.ip().protocol() == QAbstractSocket::IPv4Protocol) {
+                addresses << entry.ip().toString() + QLatin1Char(':') + QString::number(host_session_->port());
+            }
+        }
+    }
+    return addresses.join(QStringLiteral(", "));
 }
 
 QString ChatController::newSafetyCode() const {
