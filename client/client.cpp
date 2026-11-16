@@ -46,6 +46,10 @@ public:
                   << "\n  @name message  send a direct message"
                   << "\n  message        send to everyone"
                   << "\n  /who           list who is online"
+                  << "\n  /join room     join a room, creating it if needed"
+                  << "\n  #room message  send to a room you are in"
+                  << "\n  /leave room    leave a room"
+                  << "\n  /rooms         list the rooms"
                   << "\n  rotate         rotate your send key"
                   << "\n  quit           disconnect" << std::endl;
         std::string input;
@@ -95,6 +99,19 @@ private:
             print_incoming("[" + from + "] " + text);
         };
         ev.on_notice = [](const std::string& text) { print_incoming("*** " + text + " ***"); };
+        ev.on_room_message = [](const std::string& room, const std::string& from, const std::string& text) {
+            print_incoming("[#" + room + " " + from + "] " + text);
+        };
+        ev.on_room_event = [](const std::string& room, const std::string& name, bool joined) {
+            print_incoming("*** " + name + (joined ? " joined #" : " left #") + room + " ***");
+        };
+        ev.on_room_list = [](const std::vector<std::string>& rooms) {
+            std::string line = "Rooms (" + std::to_string(rooms.size()) + "):";
+            for (const auto& room : rooms) {
+                line += " #" + room;
+            }
+            print_incoming(line);
+        };
         ev.on_presence = [](const std::string&, bool, const std::string& raw) {
             print_incoming("*** " + raw + " ***");
         };
@@ -155,6 +172,35 @@ private:
             return client_.request_roster();
         }
 
+        if (line == "/rooms") {
+            return client_.request_rooms();
+        }
+        const bool joining = line.rfind("/join ", 0) == 0;
+        if (joining || line.rfind("/leave ", 0) == 0) {
+            // "#dev" and "dev" both name the room dev.
+            std::string room = line.substr(joining ? 6 : 7);
+            if (!room.empty() && room[0] == '#') {
+                room.erase(0, 1);
+            }
+            if (!SecureComm::is_valid_name(room)) {
+                std::cout << "Room names are 1-31 characters with no spaces" << std::endl;
+                return true;
+            }
+            return joining ? client_.join_room(room) : client_.leave_room(room);
+        }
+        if (line.rfind("#", 0) == 0) {
+            const size_t space = line.find(' ');
+            if (space == std::string::npos || space == 1 || !SecureComm::is_valid_name(line.substr(1, space - 1))) {
+                std::cout << "Usage: #room message" << std::endl;
+                return true;
+            }
+            const std::string body = line.substr(space + 1);
+            if (body.size() > SecureComm::MAX_TEXT_LEN) {
+                std::cout << "Message too long (max " << SecureComm::MAX_TEXT_LEN << " bytes)" << std::endl;
+                return true;
+            }
+            return client_.send_room(line.substr(1, space - 1), body);
+        }
         const bool direct = line.rfind("@", 0) == 0;
         std::string to;
         std::string text = line;
