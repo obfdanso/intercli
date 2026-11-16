@@ -160,6 +160,7 @@ struct Settings {
     std::string room_code;
     int max_wrong_codes = 10;
     int lockout_seconds = 60;
+    bool allow_global_ipv6 = false;
     LogLevel log_level = LogLevel::Info;
     std::string log_file;  // empty: the console
 };
@@ -170,6 +171,8 @@ void print_usage(const char* program) {
               << "  --room-code CODE     only people who know CODE can join (default: open chat)\n"
               << "  --max-wrong-codes N  wrong room codes allowed per address before a lockout (default 10)\n"
               << "  --lockout SECONDS    length of the first lockout; each one after doubles (default 60)\n"
+              << "  --allow-global-ipv6 yes|no  take IPv6 connections from beyond the local\n"
+              << "                       network (default no)\n"
               << "  --log-level LEVEL    quiet, error or info (default info)\n"
               << "  --log-file FILE      add log lines to FILE instead of printing them\n"
               << "  --config FILE        read settings from FILE: one \"name = value\" per line,\n"
@@ -232,6 +235,12 @@ bool apply_setting(const std::string& key, const std::string& value, Settings* s
             *error = "lockout must be a number of seconds from 1 to 3600";
             return false;
         }
+    } else if (key == "allow-global-ipv6") {
+        if (value != "yes" && value != "no") {
+            *error = "allow-global-ipv6 must be yes or no";
+            return false;
+        }
+        settings->allow_global_ipv6 = value == "yes";
     } else if (key == "log-level") {
         if (value == "quiet") {
             settings->log_level = LogLevel::Quiet;
@@ -361,6 +370,7 @@ int main(int argc, char* argv[]) {
         options.room_code = settings.room_code;
         options.max_wrong_codes_per_address = settings.max_wrong_codes;
         options.lockout = std::chrono::seconds(settings.lockout_seconds);
+        options.allow_global_ipv6 = settings.allow_global_ipv6;
         options.identity_private = load_or_create_identity();
         std::ofstream log_file;
         if (!settings.log_file.empty()) {

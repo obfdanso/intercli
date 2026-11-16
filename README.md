@@ -186,6 +186,7 @@ Options (`./server --help` lists them):
 | `--room-code CODE` | Only people who know the code can join | open chat |
 | `--max-wrong-codes N` | Wrong room codes allowed per address before a lockout | 10 |
 | `--lockout SECONDS` | Length of the first lockout; each one after doubles, up to an hour | 60 |
+| `--allow-global-ipv6 yes` | Take IPv6 connections from beyond the local network | no |
 | `--log-level LEVEL` | `quiet`, `error` or `info` | `info` |
 | `--log-file FILE` | Add log lines to a file instead of printing them | console |
 | `--config FILE` | Read settings from a file | none |
@@ -223,7 +224,9 @@ messaged whom, never what a message said.
 ./client ::1 8080          # IPv6 works too
 ```
 
-The server listens on IPv4 and IPv6 at once. In the desktop app's "Join by address", an
+The server listens on IPv4 and IPv6 at once. Over IPv6 it only takes connections from
+this PC and the local network unless started with `--allow-global-ipv6 yes`, and room
+code lockouts count a whole IPv6 network (/64) as one address. In the desktop app's "Join by address", an
 IPv6 address with a port is written `[fe80::1]:8080`. Finding chats nearby still uses
 IPv4 only.
 
