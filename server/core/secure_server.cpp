@@ -455,12 +455,6 @@ struct SecureServer::Impl {
             }
             LogLine(this, false) << "New client connected from " << addr_text << " port " << client_port;
 
-            if (banned_address(addr_text)) {
-                LogLine(this, false) << "Refused a connection from a banned address";
-                close_socket(client_socket);
-                continue;
-            }
-
             if (!admit_pending(addr_text)) {
                 // Too many connections from one address that haven't joined.
                 close_socket(client_socket);
@@ -817,7 +811,9 @@ struct SecureServer::Impl {
                         std::string reason;
                         if (!is_valid_name(wanted)) {
                             reason = "Name must be 1-31 printable characters with no spaces";
-                        } else if (banned_name(wanted)) {
+                        } else if (banned_name(wanted) || banned_address(conn->address)) {
+                            // Refused here rather than when connecting, so the
+                            // person is told why instead of seeing a dead line.
                             reason = "The host banned you from this chat";
                         } else if (!conn->name.empty()) {
                             reason = "Already registered as " + conn->name;
