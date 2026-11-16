@@ -349,6 +349,22 @@ static void host_control_tests() {
     check(guest_ears.wait("notice:The host removed you from this chat"), "the kicked person is told why");
     check(guest_ears.wait_lost(5000), "the kicked person is disconnected");
     check(host_ears.wait("presence:guest:left"), "the others see them leave");
+
+    // A kicked person may come back; a banned one may not.
+    Ears back_ears;
+    ChatClient back(listen(back_ears));
+    check(back.connect("127.0.0.1", 18130, &error), "the kicked person reconnects");
+    back.request_name("guest", "ABC234");
+    check(back_ears.wait("registered:guest"), "and joins again");
+    check(hosted.server.ban("guest"), "banning a member succeeds");
+    check(back_ears.wait("notice:The host banned you from this chat"), "the banned person is told why");
+    check(back_ears.wait_lost(5000), "the banned person is disconnected");
+
+    Ears again_ears;
+    ChatClient again(listen(again_ears));
+    check(again.connect("127.0.0.1", 18130, &error), "the banned person reconnects");
+    again.request_name("guest", "ABC234");
+    check(again_ears.wait("refused:The host banned you from this chat"), "but the name is refused");
 }
 
 int main() {

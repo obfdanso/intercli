@@ -432,6 +432,12 @@ struct SecureServer::Impl {
             }
             LogLine(this, false) << "New client connected from " << addr_text << " port " << client_port;
 
+            if (banned_address(addr_text)) {
+                LogLine(this, false) << "Refused a connection from a banned address";
+                close_socket(client_socket);
+                continue;
+            }
+
             if (!admit_pending(addr_text)) {
                 // Too many connections from one address that haven't joined.
                 close_socket(client_socket);
@@ -500,6 +506,37 @@ struct SecureServer::Impl {
 
     bool kick(const std::string& name) {
         return remove_person(name, "The host removed you from this chat");
+    }
+
+    // Names and addresses the host has banned; guarded by admin_mutex_.
+    std::set<std::string> banned_names_;
+    std::set<std::string> banned_addresses_;
+    std::mutex admin_mutex_;
+
+    bool ban(const std::string& name) {
+        std::shared_ptr<ClientConnection> conn = lookup(name);
+        if (!conn) {
+            return false;
+        }
+        {
+            std::lock_guard<std::mutex> lock(admin_mutex_);
+            banned_names_.insert(name);
+            // Never this PC's own address: the host joins from it too.
+            if (conn->address.rfind("127.", 0) != 0 && conn->address != "::1") {
+                banned_addresses_.insert(conn->address);
+            }
+        }
+        return remove_person(name, "The host banned you from this chat");
+    }
+
+    bool banned_name(const std::string& name) {
+        std::lock_guard<std::mutex> lock(admin_mutex_);
+        return banned_names_.count(name) > 0;
+    }
+
+    bool banned_address(const std::string& address) {
+        std::lock_guard<std::mutex> lock(admin_mutex_);
+        return banned_addresses_.count(address) > 0;
     }
 
     void handle_client(std::shared_ptr<ClientConnection> conn) {
@@ -757,6 +794,8 @@ struct SecureServer::Impl {
                         std::string reason;
                         if (!is_valid_name(wanted)) {
                             reason = "Name must be 1-31 printable characters with no spaces";
+                        } else if (banned_name(wanted)) {
+                            reason = "The host banned you from this chat";
                         } else if (!conn->name.empty()) {
                             reason = "Already registered as " + conn->name;
                         } else if (!register_name(wanted, conn)) {
@@ -1148,6 +1187,10 @@ void SecureServer::stop() {
 
 bool SecureServer::kick(const std::string& name) {
     return impl_->kick(name);
+}
+
+bool SecureServer::ban(const std::string& name) {
+    return impl_->ban(name);
 }
 
 size_t SecureServer::people() const {

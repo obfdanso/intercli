@@ -61,6 +61,9 @@ public:
     // Removes someone from the chat: they are told why, then disconnected.
     // They can join again. False if nobody has that name.
     bool kick(const std::string& name);
+    // Removes someone and keeps them out until the server stops: the name is
+    // refused, and so is their address unless it is this PC's own.
+    bool ban(const std::string& name);
 
     size_t people() const;  // registered names
     uint16_t port() const;
