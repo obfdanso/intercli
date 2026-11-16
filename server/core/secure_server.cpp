@@ -159,7 +159,7 @@ struct SecureServer::Impl {
     static constexpr int kMaxPendingPerAddress = 8;
 
     bool exempt(const std::string& address) const {
-        return options_.exempt_loopback && address.rfind("127.", 0) == 0;
+        return options_.exempt_loopback && (address.rfind("127.", 0) == 0 || address == "::1");
     }
 
     // Forgets addresses that are neither locked out nor recently active, and
@@ -319,7 +319,21 @@ struct SecureServer::Impl {
             return false;
         };
 
-        server_socket_ = static_cast<intptr_t>(socket(AF_INET, SOCK_STREAM, 0));
+        // One socket for both kinds of address: an IPv6 socket with V6ONLY off
+        // also takes IPv4 connections. Where IPv6 is switched off, IPv4 alone.
+        bool dual_stack = true;
+        server_socket_ = static_cast<intptr_t>(socket(AF_INET6, SOCK_STREAM, 0));
+        if (server_socket_ >= 0) {
+            int v6_only = 0;
+            if (setsockopt(static_cast<socket_t>(server_socket_), IPPROTO_IPV6, IPV6_V6ONLY,
+                           reinterpret_cast<const char*>(&v6_only), sizeof(v6_only)) < 0) {
+                close_socket(server_socket_.exchange(-1));
+            }
+        }
+        if (server_socket_ < 0) {
+            dual_stack = false;
+            server_socket_ = static_cast<intptr_t>(socket(AF_INET, SOCK_STREAM, 0));
+        }
         if (server_socket_ < 0) {
             return fail("Failed to create socket");
         }
@@ -337,12 +351,19 @@ struct SecureServer::Impl {
             return fail("Failed to set socket options");
         }
 
-        struct sockaddr_in server_addr {};
-        server_addr.sin_family = AF_INET;
-        server_addr.sin_addr.s_addr = INADDR_ANY;
-        server_addr.sin_port = htons(port);
+        struct sockaddr_in6 addr6 {};
+        addr6.sin6_family = AF_INET6;
+        addr6.sin6_addr = in6addr_any;
+        addr6.sin6_port = htons(port);
+        struct sockaddr_in addr4 {};
+        addr4.sin_family = AF_INET;
+        addr4.sin_addr.s_addr = INADDR_ANY;
+        addr4.sin_port = htons(port);
+        const struct sockaddr* server_addr = dual_stack ? reinterpret_cast<const struct sockaddr*>(&addr6)
+                                                        : reinterpret_cast<const struct sockaddr*>(&addr4);
+        const socklen_t server_addr_len = dual_stack ? sizeof(addr6) : sizeof(addr4);
 
-        if (bind(static_cast<socket_t>(server_socket_), (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+        if (bind(static_cast<socket_t>(server_socket_), server_addr, server_addr_len) < 0) {
             return fail("Port " + std::to_string(port) + " is already in use");
         }
 
@@ -366,7 +387,7 @@ struct SecureServer::Impl {
                 continue;
             }
 
-            struct sockaddr_in client_addr;
+            struct sockaddr_storage client_addr {};
             socklen_t client_len = sizeof(client_addr);
 
             intptr_t client_socket = static_cast<intptr_t>(accept(static_cast<socket_t>(server_socket_), (struct sockaddr*)&client_addr, &client_len));
@@ -379,10 +400,24 @@ struct SecureServer::Impl {
                 continue;
             }
 
-            char addr_text[INET_ADDRSTRLEN] = "?";
-            inet_ntop(AF_INET, &client_addr.sin_addr, addr_text, sizeof(addr_text));
-            LogLine(this, false) << "New client connected from " << addr_text
-                      << ":" << ntohs(client_addr.sin_port);
+            // An IPv4 client on the shared socket arrives as ::ffff:a.b.c.d; it
+            // is named a.b.c.d, so one machine is one address for the lockouts.
+            char addr_text[INET6_ADDRSTRLEN] = "?";
+            uint16_t client_port = 0;
+            if (client_addr.ss_family == AF_INET6) {
+                const auto* a = reinterpret_cast<const struct sockaddr_in6*>(&client_addr);
+                client_port = ntohs(a->sin6_port);
+                if (IN6_IS_ADDR_V4MAPPED(&a->sin6_addr)) {
+                    inet_ntop(AF_INET, a->sin6_addr.s6_addr + 12, addr_text, sizeof(addr_text));
+                } else {
+                    inet_ntop(AF_INET6, &a->sin6_addr, addr_text, sizeof(addr_text));
+                }
+            } else {
+                const auto* a = reinterpret_cast<const struct sockaddr_in*>(&client_addr);
+                client_port = ntohs(a->sin_port);
+                inet_ntop(AF_INET, &a->sin_addr, addr_text, sizeof(addr_text));
+            }
+            LogLine(this, false) << "New client connected from " << addr_text << " port " << client_port;
 
             if (!admit_pending(addr_text)) {
                 // Too many connections from one address that haven't joined.
