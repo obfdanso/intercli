@@ -325,6 +325,14 @@ static ChatEvents listen(Ears& ears) {
     ev.on_room_event = [&ears](const std::string& room, const std::string& n, bool joined) {
         ears.add("roomevent:" + room + ":" + n + (joined ? ":joined" : ":left"));
     };
+    ev.on_file = [&ears](const std::string& from, FileTarget target, const std::string& room,
+                         const std::string& name, const std::vector<uint8_t>& data) {
+        unsigned long sum = 0;
+        for (uint8_t byte : data) sum += byte;
+        const char kind = target == FileTarget::Direct ? 'd' : target == FileTarget::Room ? 'r' : 'e';
+        ears.add(std::string("file:") + from + ":" + kind + ":" + room + ":" + name + ":" +
+                 std::to_string(data.size()) + ":" + std::to_string(sum));
+    };
     ev.on_room_list = [&ears](const std::vector<std::string>& rooms) {
         std::string all;
         for (const auto& r : rooms) all += (all.empty() ? "" : ",") + r;
@@ -451,6 +459,61 @@ static void room_tests() {
     check(b_ears.wait("rooms:"), "an empty room no longer exists");
 }
 
+static void file_tests() {
+    ServerOptions options;
+    options.port = 18133;
+    Running server(options);
+    check(server.ok, "a server starts");
+
+    Ears a_ears, b_ears, c_ears;
+    ChatClient a(listen(a_ears)), b(listen(b_ears)), c(listen(c_ears));
+    std::string error;
+    check(a.connect("127.0.0.1", 18133, &error) && b.connect("127.0.0.1", 18133, &error) &&
+          c.connect("127.0.0.1", 18133, &error), "three clients connect");
+    a.request_name("ann");
+    b.request_name("ben");
+    c.request_name("cat");
+    check(a_ears.wait("registered:ann") && b_ears.wait("registered:ben") && c_ears.wait("registered:cat"),
+          "all three join the chat");
+
+    // Big enough for many pieces and several key rotations.
+    std::vector<uint8_t> photo(50000);
+    unsigned long sum = 0;
+    for (size_t i = 0; i < photo.size(); ++i) {
+        photo[i] = static_cast<uint8_t>((i * 7) % 251);
+        sum += photo[i];
+    }
+    const std::string tail = ":photo.png:50000:" + std::to_string(sum);
+
+    check(a.send_file(FileTarget::Direct, "ben", "photo.png", photo), "a file is sent to one person");
+    check(b_ears.wait("file:ann:d:" + tail), "it arrives whole");
+
+    check(a.send_file(FileTarget::Everyone, "", "empty.txt", {}), "an empty file is sent to everyone");
+    check(b_ears.wait("file:ann:e::empty.txt:0:0") && c_ears.wait("file:ann:e::empty.txt:0:0"),
+          "everyone else gets it");
+    check(!c_ears.heard("file:ann:d:" + tail), "a direct file reaches nobody else");
+
+    a.join_room("dev");
+    b.join_room("dev");
+    check(a_ears.wait("roomevent:dev:ben:joined"), "two people share a room");
+    check(a.send_file(FileTarget::Room, "dev", "photo.png", photo), "a file is sent to a room");
+    check(b_ears.wait("file:ann:r:dev" + tail), "a member gets it, marked with the room");
+    c.send_file(FileTarget::Room, "dev", "sneak.txt", {1, 2, 3});
+    check(c_ears.wait("notice:You are not in the room dev"), "a file to a room you are not in is refused");
+    a.send_file(FileTarget::Direct, "zed", "lost.txt", std::vector<uint8_t>(3000, 1));
+    check(a_ears.wait("notice:No such user: zed"), "a file to nobody is refused");
+    check(!c_ears.heard("file:ann:r:dev" + tail) && !b_ears.heard("file:cat:r:dev:sneak.txt:3:6"),
+          "room files stay in the room");
+
+    check(!a.send_file(FileTarget::Direct, "ben", "huge.bin", std::vector<uint8_t>(MAX_FILE_SIZE + 1)),
+          "a file over the limit is not sent");
+    check(!a.send_file(FileTarget::Direct, "ben", "", {1}), "a file needs a name");
+
+    // Messages still flow after all those pieces and rotations.
+    a.send_room("dev", "still here");
+    check(b_ears.wait("room:dev:ann:still here"), "the connection is fine afterwards");
+}
+
 int main() {
     const uint16_t port = 18090;
 
@@ -514,6 +577,9 @@ int main() {
 
     std::cout << "Named rooms" << std::endl;
     room_tests();
+
+    std::cout << "Files" << std::endl;
+    file_tests();
 
     if (failures == 0) {
         std::cout << "All server core tests passed" << std::endl;
