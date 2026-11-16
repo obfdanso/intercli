@@ -261,8 +261,19 @@ void ChatController::signIn(const QString& host, int port, const QString& name, 
     QString address = host.trimmed();
     // The details panel shows a hosted chat as "192.168.1.20:8080"; take the
     // port from an address pasted in that form.
+    // An IPv6 address has colons of its own, so with a port it is written
+    // "[fe80::1]:8080"; the brackets come off either way.
     const qsizetype colon = address.lastIndexOf(QLatin1Char(':'));
-    if (colon > 0 && address.count(QLatin1Char(':')) == 1) {
+    const qsizetype bracket = address.indexOf(QLatin1Char(']'));
+    if (address.startsWith(QLatin1Char('[')) && bracket > 0) {
+        const QString rest = address.mid(bracket + 1);
+        bool isNumber = false;
+        const int pasted = rest.mid(1).toInt(&isNumber);
+        if (rest.startsWith(QLatin1Char(':')) && isNumber) {
+            port = pasted;
+        }
+        address = address.mid(1, bracket - 1).trimmed();
+    } else if (colon > 0 && address.count(QLatin1Char(':')) == 1) {
         bool isNumber = false;
         const int pasted = address.mid(colon + 1).toInt(&isNumber);
         if (isNumber) {
