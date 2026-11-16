@@ -618,6 +618,11 @@ struct SecureServer::Impl {
             release_pending(conn->address);
         }
         const std::string departed = conn->name;
+        if (!departed.empty()) {
+            for (const std::string& room : leave_all_rooms(conn)) {
+                send_room_event(room, departed, false, nullptr);
+            }
+        }
         unregister(conn);
         if (!departed.empty()) {
             broadcast_presence(departed, false, std::string());
@@ -857,7 +862,7 @@ struct SecureServer::Impl {
                         const std::string wanted = get_chat_text(chat);
                         std::string reason;
                         if (!is_valid_name(wanted)) {
-                            reason = "Name must be 1-31 printable characters with no spaces";
+                            reason = "Name must be 1-31 printable characters with no spaces, not starting with #";
                         } else if (banned_name(wanted)) {
                             reason = "The host banned you from this chat";
                         } else if (!conn->name.empty()) {
@@ -928,6 +933,70 @@ struct SecureServer::Impl {
                         continue;
                     }
 
+                    if (chat.type == ChatType::ROOM_JOIN) {
+                        const std::string room = get_chat_field(chat.recipient, MAX_NAME_LEN);
+                        bool added = false;
+                        const std::string problem = join_room(room, conn, &added);
+                        if (!problem.empty()) {
+                            send_notice(conn, problem);
+                        } else if (added) {
+                            // Everyone in the room hears it, the joiner included:
+                            // that is how the joiner knows it worked.
+                            send_room_event(room, conn->name, true, nullptr);
+                            LogLine(this, false) << conn->name << " joined room " << room;
+                        }
+                        continue;
+                    }
+
+                    if (chat.type == ChatType::ROOM_LEAVE) {
+                        const std::string room = get_chat_field(chat.recipient, MAX_NAME_LEN);
+                        if (leave_room(room, conn)) {
+                            send_room_event(room, conn->name, false, conn);
+                            LogLine(this, false) << conn->name << " left room " << room;
+                        }
+                        continue;
+                    }
+
+                    if (chat.type == ChatType::ROOM_MESSAGE) {
+                        const std::string room = get_chat_field(chat.recipient, MAX_NAME_LEN);
+                        const auto members = room_members(room);
+                        if (std::find(members.begin(), members.end(), conn) == members.end()) {
+                            send_notice(conn, "You are not in the room " + room);
+                            continue;
+                        }
+                        // The sender is stamped from the registry, as for direct messages.
+                        ChatMessage out = make_chat(ChatType::ROOM_MESSAGE);
+                        set_chat_field(out.sender, MAX_NAME_LEN, conn->name);
+                        set_chat_field(out.recipient, MAX_NAME_LEN, room);
+                        set_chat_text(out, get_chat_text(chat));
+                        for (const auto& member : members) {
+                            if (member != conn) {
+                                send_chat(member, out);
+                            }
+                        }
+                        LogLine(this, false) << conn->name << " -> room " << room;
+                        continue;
+                    }
+
+                    if (chat.type == ChatType::ROOM_LIST) {
+                        // Whole names only, like the roster.
+                        std::string names;
+                        for (const std::string& room : room_names()) {
+                            const size_t needed = room.size() + (names.empty() ? 0 : 2);
+                            if (names.size() + needed > MAX_TEXT_LEN) {
+                                break;
+                            }
+                            if (!names.empty()) {
+                                names += ", ";
+                            }
+                            names += room;
+                        }
+                        ChatMessage reply = make_chat(ChatType::ROOM_LIST);
+                        set_chat_text(reply, names);
+                        send_chat(conn, reply);
+                        continue;
+                    }
+
                     if (chat.type == ChatType::WHO) {
                         // The reply is one message. If the names don't all fit,
                         // stop at a whole name: a name cut in half would show
@@ -983,6 +1052,101 @@ struct SecureServer::Impl {
                 send_error(conn, ErrorCode::INTERNAL_ERROR);
                 break;
             }
+        }
+    }
+
+    // Named rooms: who is in each. A room exists while it has members, so
+    // there is nothing to create or delete, and nobody owns one.
+    std::map<std::string, std::set<std::shared_ptr<ClientConnection>>> rooms_;
+    std::mutex rooms_mutex_;
+    static constexpr size_t kMaxRooms = 64;
+    static constexpr size_t kMaxRoomsPerPerson = 16;
+
+    // Puts conn in the room. Returns what to tell the person if it can't, or
+    // nothing; *added is false when they were in it already.
+    std::string join_room(const std::string& room, const std::shared_ptr<ClientConnection>& conn, bool* added) {
+        *added = false;
+        if (!is_valid_name(room)) {
+            return "Room names are 1-31 characters with no spaces, not starting with #";
+        }
+        std::lock_guard<std::mutex> lock(rooms_mutex_);
+        const auto it = rooms_.find(room);
+        if (it != rooms_.end() && it->second.count(conn) > 0) {
+            return std::string();
+        }
+        size_t mine = 0;
+        for (const auto& entry : rooms_) {
+            mine += entry.second.count(conn);
+        }
+        if (mine >= kMaxRoomsPerPerson) {
+            return "You are in too many rooms; leave one first";
+        }
+        if (it == rooms_.end() && rooms_.size() >= kMaxRooms) {
+            return "This chat has too many rooms";
+        }
+        rooms_[room].insert(conn);
+        *added = true;
+        return std::string();
+    }
+
+    // False if conn was not in the room.
+    bool leave_room(const std::string& room, const std::shared_ptr<ClientConnection>& conn) {
+        std::lock_guard<std::mutex> lock(rooms_mutex_);
+        const auto it = rooms_.find(room);
+        if (it == rooms_.end() || it->second.erase(conn) == 0) {
+            return false;
+        }
+        if (it->second.empty()) {
+            rooms_.erase(it);
+        }
+        return true;
+    }
+
+    // Takes conn out of every room; returns the rooms it was in.
+    std::vector<std::string> leave_all_rooms(const std::shared_ptr<ClientConnection>& conn) {
+        std::vector<std::string> left;
+        std::lock_guard<std::mutex> lock(rooms_mutex_);
+        for (auto it = rooms_.begin(); it != rooms_.end();) {
+            if (it->second.erase(conn) > 0) {
+                left.push_back(it->first);
+            }
+            it = it->second.empty() ? rooms_.erase(it) : std::next(it);
+        }
+        return left;
+    }
+
+    // A snapshot, so nothing is sent while rooms_mutex_ is held.
+    std::vector<std::shared_ptr<ClientConnection>> room_members(const std::string& room) {
+        std::lock_guard<std::mutex> lock(rooms_mutex_);
+        const auto it = rooms_.find(room);
+        if (it == rooms_.end()) {
+            return {};
+        }
+        return std::vector<std::shared_ptr<ClientConnection>>(it->second.begin(), it->second.end());
+    }
+
+    std::vector<std::string> room_names() {
+        std::lock_guard<std::mutex> lock(rooms_mutex_);
+        std::vector<std::string> names;
+        for (const auto& entry : rooms_) {
+            names.push_back(entry.first);
+        }
+        return names;
+    }
+
+    // Tells the room's members that name joined or left; also is told, when
+    // given (someone who just left is no longer a member).
+    void send_room_event(const std::string& room, const std::string& name, bool joined,
+                         const std::shared_ptr<ClientConnection>& also) {
+        ChatMessage msg = make_chat(ChatType::ROOM_EVENT);
+        set_chat_field(msg.sender, MAX_NAME_LEN, name);
+        set_chat_field(msg.recipient, MAX_NAME_LEN, room);
+        set_chat_text(msg, joined ? "joined" : "left");
+        for (const auto& member : room_members(room)) {
+            send_chat(member, msg);
+        }
+        if (also) {
+            send_chat(also, msg);
         }
     }
 

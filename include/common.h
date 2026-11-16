@@ -84,6 +84,12 @@ enum class ChatType : uint8_t {
     ROSTER        = 0x07,
     PRESENCE      = 0x08,
     NOTICE        = 0x09,
+    // Named rooms. The room's name travels in the recipient field.
+    ROOM_JOIN     = 0x0A,  // client: join the room, creating it if needed
+    ROOM_LEAVE    = 0x0B,  // client: leave the room
+    ROOM_MESSAGE  = 0x0C,  // a message to the room's members
+    ROOM_EVENT    = 0x0D,  // server: sender joined or left (text "joined" / "left")
+    ROOM_LIST     = 0x0E,  // client asks; server answers "a, b, c"
 };
 
 // The four structs below travel on the wire as raw bytes, so every compiler
@@ -334,6 +340,10 @@ inline std::string get_chat_text(const ChatMessage& msg) {
 // space and tab in one check, keeping names typeable in the @name shorthand.
 inline bool is_valid_name(const std::string& name) {
     if (name.empty() || name.size() >= MAX_NAME_LEN) {
+        return false;
+    }
+    // A leading # marks a room wherever people and rooms are listed together.
+    if (name[0] == '#') {
         return false;
     }
     for (unsigned char c : name) {
