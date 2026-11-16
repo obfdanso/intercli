@@ -206,7 +206,7 @@ bool ChatClient::connect_socket(const std::string& host, uint16_t port, std::str
     };
 
     addrinfo hints{};
-    hints.ai_family = AF_INET;
+    hints.ai_family = AF_UNSPEC;  // IPv4 or IPv6, whichever the name or address is
     hints.ai_socktype = SOCK_STREAM;
     addrinfo* results = nullptr;
     const std::string port_text = std::to_string(port);
