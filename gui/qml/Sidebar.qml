@@ -2,7 +2,8 @@ import QtQuick
 import QtQuick.Controls
 import Intercli.Backend
 
-// Left column: search, Everyone, then people online and offline.
+// Left column: search, Everyone, rooms, then people online and offline, and a
+// box at the bottom to join or create a room.
 Rectangle {
     id: sidebar
     color: Theme.sidebar
@@ -47,7 +48,8 @@ Rectangle {
         anchors.topMargin: 10
         anchors.left: parent.left
         anchors.right: parent.right
-        anchors.bottom: parent.bottom
+        anchors.bottom: roomField.top
+        anchors.bottomMargin: 8
         clip: true
         boundsBehavior: Flickable.StopAtBounds
         model: Chat.conversations
@@ -66,7 +68,8 @@ Rectangle {
                 x: 18
                 anchors.bottom: parent.bottom
                 anchors.bottomMargin: 6
-                text: parent.section === "online" ? "ONLINE — " + Chat.onlineCount : "OFFLINE"
+                text: parent.section === "rooms" ? "ROOMS"
+                    : parent.section === "online" ? "ONLINE — " + Chat.onlineCount : "OFFLINE"
                 color: Theme.textTertiary
                 font.pixelSize: 11
                 font.weight: Font.DemiBold
@@ -80,5 +83,26 @@ Rectangle {
 
         move: Transition { NumberAnimation { properties: "y"; duration: Theme.animNormal; easing.type: Easing.OutCubic } }
         displaced: Transition { NumberAnimation { properties: "y"; duration: Theme.animNormal; easing.type: Easing.OutCubic } }
+    }
+    // Type a room's name and press Enter: joins it, or creates it if nobody is in it.
+    AppTextField {
+        id: roomField
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.leftMargin: 12
+        anchors.rightMargin: 12
+        anchors.bottomMargin: 12
+        implicitHeight: 30
+        font.pixelSize: 13
+        maximumLength: 32
+        enabled: Chat.state === Chat.Online
+        placeholderText: "Join or create a room"
+        Accessible.name: "Join or create a room"
+        invalid: text.length > 0 && !Chat.isValidName(text.charAt(0) === "#" ? text.substring(1) : text)
+        onAccepted: {
+            if (Chat.joinRoom(text))
+                clear()
+        }
     }
 }

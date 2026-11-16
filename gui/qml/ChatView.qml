@@ -8,6 +8,7 @@ Item {
     id: root
     readonly property bool everyone: Chat.currentConversation === ""
     readonly property string peer: Chat.currentConversation
+    readonly property bool room: peer.charAt(0) === "#"
     signal signOutRequested()
 
     Settings {
@@ -81,7 +82,7 @@ Item {
                 Text {
                     // Peer and server text is shown as typed, never as markup.
                     textFormat: Text.PlainText
-                    text: root.everyone ? (Chat.onlineCount + 1) + " online" : "Direct message"
+                    text: root.everyone ? (Chat.onlineCount + 1) + " online" : root.room ? "Room" : "Direct message"
                     color: Theme.textTertiary
                     font.pixelSize: 11
                 }

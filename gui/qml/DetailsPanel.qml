@@ -8,6 +8,7 @@ Rectangle {
     id: panel
     readonly property string peer: Chat.currentConversation
     readonly property bool everyone: peer === ""
+    readonly property bool room: peer.charAt(0) === "#"
     readonly property bool peerOnline: Chat.onlineNames.indexOf(peer) >= 0
     property int tick: 0   // bumps every 30 s so relative times refresh
     // Main asks first when signing out would end the chat for others.
@@ -137,9 +138,23 @@ Rectangle {
                 anchors.horizontalCenter: parent.horizontalCenter
                 topPadding: 3
                 text: panel.everyone ? (Chat.onlineCount + 1) + " online"
-                    : panel.peerOnline ? "● Online" : "Offline"
+                    : panel.room ? "Room" : panel.peerOnline ? "● Online" : "Offline"
                 color: !panel.everyone && panel.peerOnline ? Theme.online : Theme.textTertiary
                 font.pixelSize: 12
+            }
+            Item {
+                visible: panel.room
+                width: parent.width
+                height: visible ? leaveRoomButton.height + 12 : 0
+                HostButton {
+                    id: leaveRoomButton
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    anchors.bottom: parent.bottom
+                    label: "Leave Room"
+                    accessibleName: "Leave the room " + panel.peer
+                    danger: true
+                    onPressed: Chat.leaveRoom(panel.peer)
+                }
             }
 
             // Everyone: who is online right now.

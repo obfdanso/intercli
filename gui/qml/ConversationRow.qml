@@ -81,7 +81,7 @@ Item {
                 anchors.rightMargin: badge.visible ? 6 : 0
                 anchors.bottom: parent.bottom
                 text: row.preview.length > 0 ? row.preview.replace(/\n/g, " ")
-                    : (row.conversationId === "" ? "Message everyone online" : (row.online ? "Online" : "Offline"))
+                    : (row.conversationId === "" ? "Message everyone online" : (row.conversationId.charAt(0) === "#" ? "Room" : (row.online ? "Online" : "Offline")))
                 color: row.selected ? Qt.rgba(1, 1, 1, 0.8) : Theme.textSecondary
                 font.pixelSize: 12
                 elide: Text.ElideRight
