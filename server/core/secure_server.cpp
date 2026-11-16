@@ -266,9 +266,32 @@ struct SecureServer::Impl {
     }
 
     // Constant time, so how long the comparison takes says nothing about the code.
+    mutable std::mutex room_code_mutex_;
+
+    // Whether there is a code never changes while running (the per-address
+    // counts depend on it), so only the code itself needs the lock.
+    bool set_room_code(const std::string& typed) {
+        const std::string code = normalize_room_code(typed);
+        if (code.empty() || code.size() >= MAX_NAME_LEN) {
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(room_code_mutex_);
+        if (options_.room_code.empty()) {
+            return false;
+        }
+        options_.room_code = code;
+        LogLine(this, false) << "The host changed the room code";
+        return true;
+    }
+
     bool room_code_matches(const std::string& typed) const {
         const std::string candidate = normalize_room_code(typed);
-        const std::string& code = options_.room_code;
+        std::string code;
+        {
+            // The host can change the code while people are joining.
+            std::lock_guard<std::mutex> lock(room_code_mutex_);
+            code = options_.room_code;
+        }
         if (candidate.size() != code.size()) {
             return false;
         }
@@ -1191,6 +1214,10 @@ bool SecureServer::kick(const std::string& name) {
 
 bool SecureServer::ban(const std::string& name) {
     return impl_->ban(name);
+}
+
+bool SecureServer::set_room_code(const std::string& code) {
+    return impl_->set_room_code(code);
 }
 
 size_t SecureServer::people() const {

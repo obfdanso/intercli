@@ -64,6 +64,10 @@ public:
     // Removes someone and keeps them out until the server stops: the name is
     // refused, and so is their address unless it is this PC's own.
     bool ban(const std::string& name);
+    // Changes the room code for whoever joins from now on; people already in
+    // the chat stay. False if the server was started without a room code, or
+    // the new code is empty.
+    bool set_room_code(const std::string& code);
 
     size_t people() const;  // registered names
     uint16_t port() const;

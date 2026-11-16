@@ -365,6 +365,22 @@ static void host_control_tests() {
     check(again.connect("127.0.0.1", 18130, &error), "the banned person reconnects");
     again.request_name("guest", "ABC234");
     check(again_ears.wait("refused:The host banned you from this chat"), "but the name is refused");
+
+    check(!hosted.server.set_room_code(""), "an empty room code is refused");
+    check(hosted.server.set_room_code("xyz-789"), "the room code can be changed");
+    Ears late_ears;
+    ChatClient late(listen(late_ears));
+    check(late.connect("127.0.0.1", 18130, &error), "a newcomer connects");
+    late.request_name("late", "ABC234");
+    check(late_ears.wait("refused:Wrong room code"), "the old code no longer works");
+    late.request_name("late", "XYZ789");
+    check(late_ears.wait("registered:late"), "the new code does");
+    check(host.connected(), "people already in the chat stay");
+
+    ServerOptions open_options;
+    open_options.port = 18131;
+    Running open_server(open_options);
+    check(!open_server.server.set_room_code("ABC234"), "an open server cannot gain a room code while running");
 }
 
 int main() {
