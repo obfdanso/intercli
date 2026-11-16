@@ -4,6 +4,9 @@
 #include "../crypto/crypto_utils.h"
 #include <chrono>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <condition_variable>
 #include <iostream>
 #include <mutex>
@@ -50,6 +53,7 @@ public:
                   << "\n  #room message  send to a room you are in"
                   << "\n  /leave room    leave a room"
                   << "\n  /rooms         list the rooms"
+                  << "\n  /send to path  send a file (up to 8 MB); to is @name, #room or all"
                   << "\n  rotate         rotate your send key"
                   << "\n  quit           disconnect" << std::endl;
         std::string input;
@@ -104,6 +108,32 @@ private:
         };
         ev.on_room_event = [](const std::string& room, const std::string& name, bool joined) {
             print_incoming("*** " + name + (joined ? " joined #" : " left #") + room + " ***");
+        };
+        ev.on_file = [](const std::string& from, SecureComm::FileTarget, const std::string& room,
+                        const std::string& name, const std::vector<uint8_t>& data) {
+            // The name is the sender's choice: keep only a plain file name, and
+            // never write over something that is already there.
+            std::string safe = std::filesystem::path(name).filename().string();
+            for (char& c : safe) {
+                if (static_cast<unsigned char>(c) < 0x20 || std::string("\\/:*?\"<>|").find(c) != std::string::npos) {
+                    c = '_';
+                }
+            }
+            if (safe.empty() || safe == "." || safe == "..") {
+                safe = "file";
+            }
+            std::error_code ec;
+            const std::filesystem::path dir = "intercli-downloads";
+            std::filesystem::create_directories(dir, ec);
+            std::filesystem::path target = dir / safe;
+            for (int n = 1; std::filesystem::exists(target, ec) && n < 1000; ++n) {
+                target = dir / (std::to_string(n) + "-" + safe);
+            }
+            std::ofstream out(target, std::ios::binary);
+            out.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+            const std::string where = room.empty() ? "" : " in #" + room;
+            print_incoming(out ? "*** " + from + " sent a file" + where + ": saved as " + target.string() + " ***"
+                               : "*** " + from + " sent a file" + where + ", but it could not be saved ***");
         };
         ev.on_room_list = [](const std::vector<std::string>& rooms) {
             std::string line = "Rooms (" + std::to_string(rooms.size()) + "):";
@@ -172,6 +202,33 @@ private:
             return client_.request_roster();
         }
 
+        if (line.rfind("/send ", 0) == 0) {
+            const size_t space = line.find(' ', 6);
+            const std::string to = line.substr(6, space == std::string::npos ? std::string::npos : space - 6);
+            const std::string path = space == std::string::npos ? "" : line.substr(space + 1);
+            const bool to_all = to == "all";
+            const bool to_room = to.size() > 1 && to[0] == '#';
+            const bool to_person = to.size() > 1 && to[0] == '@';
+            if (path.empty() || !(to_all || to_room || to_person)) {
+                std::cout << "Usage: /send @name|#room|all path" << std::endl;
+                return true;
+            }
+            std::ifstream in(path, std::ios::binary);
+            if (!in) {
+                std::cout << "Can't open " << path << std::endl;
+                return true;
+            }
+            const std::vector<uint8_t> data((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            const auto target = to_all ? SecureComm::FileTarget::Everyone
+                              : to_room ? SecureComm::FileTarget::Room : SecureComm::FileTarget::Direct;
+            if (data.size() > SecureComm::MAX_FILE_SIZE ||
+                !client_.send_file(target, to_all ? "" : to.substr(1), std::filesystem::path(path).filename().string(), data)) {
+                std::cout << "Couldn't send the file (the limit is 8 MB)" << std::endl;
+            } else {
+                std::cout << "File sent" << std::endl;
+            }
+            return true;
+        }
         if (line == "/rooms") {
             return client_.request_rooms();
         }
