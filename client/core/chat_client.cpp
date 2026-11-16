@@ -443,6 +443,38 @@ bool ChatClient::request_roster() {
     return send_chat(make_chat(ChatType::WHO));
 }
 
+bool ChatClient::join_room(const std::string& room) {
+    if (!is_valid_name(room)) {
+        return false;
+    }
+    ChatMessage msg = make_chat(ChatType::ROOM_JOIN);
+    set_chat_field(msg.recipient, MAX_NAME_LEN, room);
+    return send_chat(msg);
+}
+
+bool ChatClient::leave_room(const std::string& room) {
+    if (!is_valid_name(room)) {
+        return false;
+    }
+    ChatMessage msg = make_chat(ChatType::ROOM_LEAVE);
+    set_chat_field(msg.recipient, MAX_NAME_LEN, room);
+    return send_chat(msg);
+}
+
+bool ChatClient::send_room(const std::string& room, const std::string& text) {
+    if (text.size() > MAX_TEXT_LEN || !is_valid_name(room)) {
+        return false;
+    }
+    ChatMessage msg = make_chat(ChatType::ROOM_MESSAGE);
+    set_chat_field(msg.recipient, MAX_NAME_LEN, room);
+    set_chat_text(msg, text);
+    return send_chat(msg);
+}
+
+bool ChatClient::request_rooms() {
+    return send_chat(make_chat(ChatType::ROOM_LIST));
+}
+
 bool ChatClient::rotate_send_key() {
     bool ok;
     {
@@ -597,6 +629,22 @@ void ChatClient::handle_chat(const ChatMessage& msg) {
             break;
         case ChatType::NOTICE:
             if (events_.on_notice) events_.on_notice(text);
+            break;
+        case ChatType::ROOM_MESSAGE:
+            if (events_.on_room_message) {
+                events_.on_room_message(get_chat_field(msg.recipient, MAX_NAME_LEN), from, text);
+            }
+            break;
+        case ChatType::ROOM_EVENT:
+            if (events_.on_room_event) {
+                events_.on_room_event(get_chat_field(msg.recipient, MAX_NAME_LEN), from, text == "joined");
+            }
+            break;
+        case ChatType::ROOM_LIST:
+            if (events_.on_room_list) {
+                // Same "a, b, c" shape as the roster's names.
+                events_.on_room_list(parse_roster("Online (0): " + text));
+            }
             break;
         case ChatType::ROSTER:
             if (events_.on_roster) events_.on_roster(parse_roster(text), text);

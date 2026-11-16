@@ -30,6 +30,11 @@ struct ChatEvents {
     std::function<void(const std::string& from, const std::string& text)> on_broadcast;
     std::function<void(const std::vector<std::string>& names, const std::string& raw)> on_roster;
     std::function<void(const std::string& name, bool joined, const std::string& raw)> on_presence;
+    // Named rooms: a message to a room we are in; someone (maybe us) joining
+    // or leaving one; and the answer to request_rooms().
+    std::function<void(const std::string& room, const std::string& from, const std::string& text)> on_room_message;
+    std::function<void(const std::string& room, const std::string& name, bool joined)> on_room_event;
+    std::function<void(const std::vector<std::string>& rooms)> on_room_list;
     std::function<void(const std::string& text)> on_notice;
     std::function<void(const std::string& text)> on_server_error;
     std::function<void()> on_send_key_rotated;
@@ -85,6 +90,13 @@ public:
     bool send_direct(const std::string& to, const std::string& text);
     bool send_broadcast(const std::string& text);
     bool request_roster();
+
+    // Named rooms. Joining a room that doesn't exist creates it; our own
+    // on_room_event (joined) is the confirmation. A problem comes as a notice.
+    bool join_room(const std::string& room);
+    bool leave_room(const std::string& room);
+    bool send_room(const std::string& room, const std::string& text);
+    bool request_rooms();
     bool rotate_send_key();
 
     bool connected() const;
