@@ -124,6 +124,25 @@ private slots:
         QCOMPARE(bob->onlineCount(), 1);
     }
 
+    // "Join by address" takes an address with its port, the way the app shows
+    // a hosted chat, and an IPv6 address in brackets.
+    void address_with_port_is_accepted() {
+        ChatController four;
+        four.signIn(QStringLiteral("127.0.0.1:%1").arg(SecureComm::DEFAULT_PORT), 1, "four");
+        QTRY_COMPARE_WITH_TIMEOUT(four.state(), ChatController::Online, kWait);
+        QCOMPARE(four.serverHost(), QStringLiteral("127.0.0.1"));
+        QCOMPARE(four.serverPort(), int(SecureComm::DEFAULT_PORT));
+
+        ChatController six;
+        six.signIn(QStringLiteral("[::1]:%1").arg(SecureComm::DEFAULT_PORT), 1, "six");
+        QTRY_COMPARE_WITH_TIMEOUT(six.state(), ChatController::Online, kWait);
+        QCOMPARE(six.serverHost(), QStringLiteral("::1"));
+
+        ChatController bare;
+        bare.signIn("::1", SecureComm::DEFAULT_PORT, "bare");
+        QTRY_COMPARE_WITH_TIMEOUT(bare.state(), ChatController::Online, kWait);
+    }
+
     void taken_name_reports_name_error() {
         ChatController other;
         other.signIn("127.0.0.1", SecureComm::DEFAULT_PORT, "bob");
@@ -404,7 +423,9 @@ private slots:
             QTRY_COMPARE_WITH_TIMEOUT(redirected.state(), ChatController::SignedOut, kWait);
             QVERIFY2(redirected.connectError().contains("identity"), qPrintable(redirected.connectError()));
             QTest::qWait(500);
-            QCOMPARE(host.peopleInChat(), 2);
+            // The count is polled every two seconds, so it may still include
+            // wary, who signed out just above.
+            QTRY_COMPARE_WITH_TIMEOUT(host.peopleInChat(), 2, 6000);
         }
 
         // The joiner drops and comes back: found again by chat id.
