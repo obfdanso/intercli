@@ -135,6 +135,10 @@ std::vector<uint8_t> CryptoManager::encrypt_aes_gcm(const std::vector<uint8_t>& 
                                                    const std::vector<uint8_t>& key,
                                                    const std::vector<uint8_t>& iv,
                                                    const std::vector<uint8_t>& aad) {
+    // OpenSSL reads a full key and IV whatever the vectors hold.
+    if (key.size() != KEY_SIZE || iv.size() != IV_SIZE) {
+        throw CryptoException("AES-GCM needs a 32-byte key and a 12-byte IV");
+    }
     EVPContext ctx;
     const EVP_CIPHER* cipher = EVP_aes_256_gcm();
 
@@ -176,6 +180,9 @@ std::vector<uint8_t> CryptoManager::decrypt_aes_gcm(const std::vector<uint8_t>& 
                                                    const std::vector<uint8_t>& key,
                                                    const std::vector<uint8_t>& iv,
                                                    const std::vector<uint8_t>& aad) {
+    if (key.size() != KEY_SIZE || iv.size() != IV_SIZE) {
+        throw CryptoException("AES-GCM needs a 32-byte key and a 12-byte IV");
+    }
     EVPContext ctx;
     const EVP_CIPHER* cipher = EVP_aes_256_gcm();
 
@@ -326,7 +333,14 @@ std::string format_room_code(const std::string& code) {
 std::vector<uint8_t> CryptoManager::perform_dh_key_exchange(const std::vector<uint8_t>& private_key,
                                                            const std::vector<uint8_t>& peer_public_key) {
     EVP_PKEY* priv_key = bytes_to_rsa_private_key(private_key);
-    EVP_PKEY* pub_key = bytes_to_rsa_public_key(peer_public_key);
+    EVP_PKEY* pub_key = nullptr;
+    try {
+        // The peer's key comes off the network; a bad one must not leak ours.
+        pub_key = bytes_to_rsa_public_key(peer_public_key);
+    } catch (...) {
+        EVP_PKEY_free(priv_key);
+        throw;
+    }
 
     EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new(priv_key, nullptr);
     if (!ctx) {
@@ -821,11 +835,16 @@ std::vector<uint32_t> SessionManager::get_expired_sessions(std::chrono::seconds 
 // Utility functions
 
 std::vector<uint8_t> hex_to_bytes(const std::string& hex) {
+    if (hex.length() % 2 != 0) {
+        throw CryptoException("Hex text must have an even number of digits");
+    }
     std::vector<uint8_t> bytes;
     for (size_t i = 0; i < hex.length(); i += 2) {
-        std::string byte_string = hex.substr(i, 2);
-        uint8_t byte = static_cast<uint8_t>(std::stoi(byte_string, nullptr, 16));
-        bytes.push_back(byte);
+        if (!std::isxdigit(static_cast<unsigned char>(hex[i])) ||
+            !std::isxdigit(static_cast<unsigned char>(hex[i + 1]))) {
+            throw CryptoException("Hex text contains a character that is not a hex digit");
+        }
+        bytes.push_back(static_cast<uint8_t>(std::stoi(hex.substr(i, 2), nullptr, 16)));
     }
     return bytes;
 }

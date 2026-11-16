@@ -86,6 +86,18 @@ static void set_send_timeout(intptr_t s, int ms) {
 #endif
 }
 
+// Linux raises SIGPIPE on a send to a closed socket, which would end the whole
+// process (the desktop app too, when it hosts); ask for an error instead.
+#ifdef MSG_NOSIGNAL
+constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+constexpr int kSendFlags = 0;
+#endif
+
+// A connection gets this long to finish the handshake, so one that connects
+// and then says nothing cannot hold a thread for ever.
+constexpr std::chrono::seconds kHandshakeTimeout(10);
+
 static int wait_readable(intptr_t s, int timeout_ms) {
     pollfd p{};
     p.events = POLLIN;
@@ -129,9 +141,6 @@ struct SecureServer::Impl {
     std::set<std::shared_ptr<ClientConnection>> connections_;
     std::mutex connections_mutex_;
     std::condition_variable connections_cv_;
-    std::thread cleanup_thread_;
-    std::mutex stop_mutex_;
-    std::condition_variable stop_cv_;
     std::map<std::string, std::shared_ptr<ClientConnection>> registry_;
     std::mutex registry_mutex_;
 
@@ -345,13 +354,8 @@ struct SecureServer::Impl {
         LogLine(this, false) << "Secure server started on port " << port;
         LogLine(this, false) << "Server safety code: " << safety_code(identity_.public_raw);
 
-        // Expire old sessions every 5 minutes; stop() wakes this early to exit.
-        cleanup_thread_ = std::thread([this]() {
-            std::unique_lock<std::mutex> lock(stop_mutex_);
-            while (!stop_cv_.wait_for(lock, std::chrono::minutes(5), [this] { return !running_; })) {
-                session_manager_->cleanup_expired_sessions();
-            }
-        });
+        // Sessions are removed when their connection ends. (Expiring them by
+        // age cut off every client that had been connected for a day.)
 
         return true;
     }
@@ -369,6 +373,8 @@ struct SecureServer::Impl {
             if (client_socket < 0) {
                 if (running_) {
                     LogLine(this, true) << "Failed to accept client connection";
+                    // Out of descriptors, say: don't spin on the same failure.
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 }
                 continue;
             }
@@ -401,14 +407,7 @@ struct SecureServer::Impl {
     }
 
     void stop() {
-        {
-            std::lock_guard<std::mutex> lock(stop_mutex_);
-            running_ = false;
-        }
-        stop_cv_.notify_all();
-        if (cleanup_thread_.joinable()) {
-            cleanup_thread_.join();
-        }
+        running_ = false;
 
         const intptr_t listener = server_socket_.exchange(-1);
         if (listener >= 0) {
@@ -504,8 +503,10 @@ struct SecureServer::Impl {
 
     bool perform_handshake(intptr_t client_socket, SessionInfo& session) {
         try {
+            const auto deadline = std::chrono::steady_clock::now() + kHandshakeTimeout;
+
             // Step 1: receive the client's hello.
-            std::vector<uint8_t> handshake_data = receive_data(client_socket);
+            std::vector<uint8_t> handshake_data = receive_data(client_socket, &deadline);
             if (handshake_data.size() < sizeof(MessageHeader) + sizeof(HandshakeMessage)) {
                 LogLine(this, true) << "Handshake message too short";
                 return false;
@@ -584,7 +585,7 @@ struct SecureServer::Impl {
             }
 
             // Step 4: the client confirms.
-            std::vector<uint8_t> complete_data = receive_data(client_socket);
+            std::vector<uint8_t> complete_data = receive_data(client_socket, &deadline);
             if (complete_data.size() < sizeof(MessageHeader)) {
                 LogLine(this, true) << "Handshake confirmation missing";
                 return false;
@@ -735,8 +736,8 @@ struct SecureServer::Impl {
                         set_chat_text(out, get_chat_text(chat));
                         send_chat(target, out);
 
-                        LogLine(this, false) << conn->name << " -> " << to << ": "
-                                  << get_chat_text(chat);
+                        // Who, never what: message text stays out of the log.
+                        LogLine(this, false) << conn->name << " -> " << to;
                         continue;
                     }
 
@@ -752,20 +753,28 @@ struct SecureServer::Impl {
                             }
                         }
 
-                        LogLine(this, false) << conn->name << " (all): "
-                                  << get_chat_text(chat);
+                        LogLine(this, false) << conn->name << " -> everyone";
                         continue;
                     }
 
                     if (chat.type == ChatType::WHO) {
+                        // The reply is one message. If the names don't all fit,
+                        // stop at a whole name: a name cut in half would show
+                        // up as someone who doesn't exist.
+                        const auto peers = roster_snapshot();
+                        const size_t count = peers.size();
+                        const size_t room = MAX_TEXT_LEN - (std::string("Online (): ").size() +
+                                                            std::to_string(count).size());
                         std::string names;
-                        size_t count = 0;
-                        for (const auto& peer : roster_snapshot()) {
+                        for (const auto& peer : peers) {
+                            const size_t needed = peer->name.size() + (names.empty() ? 0 : 2);
+                            if (names.size() + needed > room) {
+                                break;
+                            }
                             if (!names.empty()) {
                                 names += ", ";
                             }
                             names += peer->name;
-                            ++count;
                         }
                         ChatMessage reply =
                             make_chat(ChatType::ROSTER);
@@ -860,7 +869,7 @@ struct SecureServer::Impl {
             }
 
             if (!send_data(conn->socket, frame)) {
-                conn->alive = false;
+                drop_locked(conn);
                 return;
             }
 
@@ -868,14 +877,23 @@ struct SecureServer::Impl {
             // encrypt with the old key and send after the marker has gone out.
             if (++conn->sent_count % KEY_ROTATION_INTERVAL == 0) {
                 if (!rotate_tx_and_announce(conn)) {
-                    conn->alive = false;
+                    drop_locked(conn);
                     return;
                 }
                 LogLine(this, false) << "Rotated send key for session " << conn->session_id;
             }
         } catch (const std::exception&) {
-            conn->alive = false;
+            drop_locked(conn);
         }
+    }
+
+    // A send to this client failed or timed out, so its stream can no longer be
+    // trusted. Cutting the socket ends its receive thread, which unregisters the
+    // name; otherwise it would stay "online" and never get another message.
+    // The caller holds send_mutex, so the socket has not been closed yet.
+    void drop_locked(const std::shared_ptr<ClientConnection>& conn) {
+        conn->alive = false;
+        shutdown_socket(conn->socket);
     }
 
     void broadcast_presence(const std::string& name, bool joined, const std::string& except) {
@@ -969,9 +987,14 @@ struct SecureServer::Impl {
         }
     }
 
-    bool receive_all(intptr_t client_socket, uint8_t* data, size_t length) {
+    // deadline, when given, is the latest the whole read may take.
+    bool receive_all(intptr_t client_socket, uint8_t* data, size_t length,
+                     const std::chrono::steady_clock::time_point* deadline = nullptr) {
         size_t total = 0;
         while (total < length) {
+            if (deadline && std::chrono::steady_clock::now() >= *deadline) {
+                return false;
+            }
             const int ready = wait_readable(client_socket, 500);
             if (ready < 0 || (ready == 0 && !running_)) {
                 return false;
@@ -989,9 +1012,10 @@ struct SecureServer::Impl {
         return true;
     }
 
-    std::vector<uint8_t> receive_data(intptr_t client_socket) {
+    std::vector<uint8_t> receive_data(intptr_t client_socket,
+                                      const std::chrono::steady_clock::time_point* deadline = nullptr) {
         uint32_t length_be = 0;
-        if (!receive_all(client_socket, reinterpret_cast<uint8_t*>(&length_be), sizeof(length_be))) {
+        if (!receive_all(client_socket, reinterpret_cast<uint8_t*>(&length_be), sizeof(length_be), deadline)) {
             return std::vector<uint8_t>();
         }
 
@@ -1001,7 +1025,7 @@ struct SecureServer::Impl {
         }
 
         std::vector<uint8_t> buffer(length);
-        if (!receive_all(client_socket, buffer.data(), length)) {
+        if (!receive_all(client_socket, buffer.data(), length, deadline)) {
             return std::vector<uint8_t>();
         }
         return buffer;
@@ -1011,7 +1035,7 @@ struct SecureServer::Impl {
         size_t total = 0;
         while (total < length) {
             int sent = send(static_cast<socket_t>(client_socket), reinterpret_cast<const char*>(data + total),
-                            static_cast<int>(length - total), 0);
+                            static_cast<int>(length - total), kSendFlags);
             if (sent <= 0) {
                 return false;
             }

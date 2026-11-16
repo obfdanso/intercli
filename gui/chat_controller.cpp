@@ -258,12 +258,25 @@ void ChatController::signIn(const QString& host, int port, const QString& name, 
         setErrors(QString(), QStringLiteral("Names are 1-31 characters with no spaces"));
         return;
     }
-    if (host.trimmed().isEmpty() || port < 1 || port > 65535) {
+    QString address = host.trimmed();
+    // The details panel shows a hosted chat as "192.168.1.20:8080"; take the
+    // port from an address pasted in that form.
+    const qsizetype colon = address.lastIndexOf(QLatin1Char(':'));
+    if (colon > 0 && address.count(QLatin1Char(':')) == 1) {
+        bool isNumber = false;
+        const int pasted = address.mid(colon + 1).toInt(&isNumber);
+        if (isNumber) {
+            port = pasted;
+            address = address.left(colon).trimmed();
+        }
+    }
+    if (address.isEmpty() || port < 1 || port > 65535) {
         setErrors(QStringLiteral("Enter a server address and a port from 1 to 65535"), QString());
         return;
     }
-    host_ = host.trimmed();
+    host_ = address;
     port_ = port;
+    emit serverChanged();
     chat_id_.clear();
     announced_identity_.clear();
     room_code_ = QString::fromStdString(SecureComm::normalize_room_code(ss(roomCode)));

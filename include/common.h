@@ -22,11 +22,6 @@
 #include <openssl/dh.h>
 #include <openssl/aes.h>
 
-// MSVC compatibility - use pragma pack
-#ifdef _MSC_VER
-    #pragma pack(push, 1)
-#endif
-
 namespace SecureComm {
 
 // Protocol constants
@@ -91,6 +86,11 @@ enum class ChatType : uint8_t {
     NOTICE        = 0x09,
 };
 
+// The four structs below travel on the wire as raw bytes, so every compiler
+// must lay them out identically: without packing, GCC and Clang add padding
+// that MSVC builds do not, and the two cannot talk to each other.
+#pragma pack(push, 1)
+
 // Message header structure
 struct MessageHeader {
     ProtocolVersion version;
@@ -130,6 +130,8 @@ struct EncryptedMessage {
     uint8_t iv[IV_SIZE];
     uint8_t encrypted_data[MAX_MESSAGE_SIZE];
 };
+
+#pragma pack(pop)
 
 // Session information
 struct SessionInfo {
@@ -214,23 +216,20 @@ inline std::string bytes_to_hex(const std::vector<uint8_t>& bytes) {
 }
 
 inline uint32_t generate_session_id() {
-    static std::random_device rd;
-    static std::mt19937 gen(rd());
-    static std::uniform_int_distribution<unsigned int> dis(1, 0xFFFFFFFF);
+    thread_local std::mt19937 gen(std::random_device{}());
+    std::uniform_int_distribution<unsigned int> dis(1, 0xFFFFFFFF);
     return static_cast<uint32_t>(dis(gen));
 }
 
 inline uint32_t generate_client_id() {
-    static std::random_device rd;
-    static std::mt19937 gen(rd());
-    static std::uniform_int_distribution<unsigned int> dis(1, 0xFFFFFFFF);
+    thread_local std::mt19937 gen(std::random_device{}());
+    std::uniform_int_distribution<unsigned int> dis(1, 0xFFFFFFFF);
     return static_cast<uint32_t>(dis(gen));
 }
 
 inline std::vector<uint8_t> generate_nonce(size_t size) {
-    static std::random_device rd;
-    static std::mt19937 gen(rd());
-    static std::uniform_int_distribution<unsigned int> dis(0, 255);
+    thread_local std::mt19937 gen(std::random_device{}());
+    std::uniform_int_distribution<unsigned int> dis(0, 255);
     
     std::vector<uint8_t> nonce(size);
     for (size_t i = 0; i < size; ++i) {
@@ -398,7 +397,4 @@ inline std::vector<uint8_t> handshake_transcript(uint32_t session_id,
 }
 
 } // namespace SecureComm
-
-#ifdef _MSC_VER
-    #pragma pack(pop)
-#endif 
+ 

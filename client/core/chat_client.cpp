@@ -15,7 +15,7 @@
     #include <unistd.h>
     #include <fcntl.h>
     #include <cerrno>
-    #include <sys/select.h>
+    #include <poll.h>
     #include <netinet/tcp.h>
 #endif
 
@@ -65,6 +65,14 @@ void enable_keepalive(intptr_t raw) {
 #endif
 }
 constexpr int kHandshakeTimeoutMs = 10000;
+
+// Linux raises SIGPIPE on a send after the server has gone, which would end the
+// whole program; ask for an error instead.
+#ifdef MSG_NOSIGNAL
+constexpr int kSendFlags = MSG_NOSIGNAL;
+#else
+constexpr int kSendFlags = 0;
+#endif
 
 MessageHeader make_header(MessageType type, uint32_t sequence, uint16_t payload_size) {
     MessageHeader header{};
@@ -229,6 +237,27 @@ bool ChatClient::connect_socket(const std::string& host, uint16_t port, std::str
             connected = true;
         } else if (pending) {
             for (int waited = 0; waited < kConnectTimeoutMs && !cancelled_; waited += 100) {
+#ifndef _WIN32
+                // poll(), not select(): FD_SET on a descriptor >= FD_SETSIZE
+                // writes out of bounds.
+                pollfd p{};
+                p.fd = s;
+                p.events = POLLOUT;
+                const int ready = poll(&p, 1, 100);
+                if (ready < 0 && errno == EINTR) {
+                    continue;
+                }
+                if (ready < 0) {
+                    break;
+                }
+                if (ready > 0) {
+                    int so_error = 0;
+                    socklen_t len = sizeof(so_error);
+                    getsockopt(s, SOL_SOCKET, SO_ERROR, &so_error, &len);
+                    connected = (p.revents & POLLOUT) && so_error == 0;
+                    break;
+                }
+#else
                 fd_set writable;
                 fd_set failed;
                 FD_ZERO(&writable);
@@ -247,6 +276,7 @@ bool ChatClient::connect_socket(const std::string& host, uint16_t port, std::str
                     connected = FD_ISSET(s, &writable) && so_error == 0;
                     break;
                 }
+#endif
             }
         }
 
@@ -832,7 +862,7 @@ bool ChatClient::send_all(const uint8_t* data, size_t length) {
     size_t total = 0;
     while (total < length) {
         const int sent = send(static_cast<socket_t>(s), reinterpret_cast<const char*>(data + total),
-                              static_cast<int>(length - total), 0);
+                              static_cast<int>(length - total), kSendFlags);
         if (sent <= 0) {
             return false;
         }

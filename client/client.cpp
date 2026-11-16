@@ -204,7 +204,12 @@ int main(int argc, char* argv[]) {
 
     try {
         // Inside the try: std::stoi throws on a non-numeric port.
-        const uint16_t port = (argc > 2) ? static_cast<uint16_t>(std::stoi(argv[2])) : SecureComm::DEFAULT_PORT;
+        const int port_number = (argc > 2) ? std::stoi(argv[2]) : SecureComm::DEFAULT_PORT;
+        if (port_number < 1 || port_number > 65535) {
+            std::cerr << "The port must be a number from 1 to 65535" << std::endl;
+            return 1;
+        }
+        const uint16_t port = static_cast<uint16_t>(port_number);
         const char* room_code = std::getenv("INTERCLI_ROOM_CODE");
         TerminalClient client(room_code ? room_code : "");
 
