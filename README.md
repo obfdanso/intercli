@@ -220,7 +220,12 @@ messaged whom, never what a message said.
 **Example:**
 ```bash
 ./client 127.0.0.1 8080
+./client ::1 8080          # IPv6 works too
 ```
+
+The server listens on IPv4 and IPv6 at once. In the desktop app's "Join by address", an
+IPv6 address with a port is written `[fe80::1]:8080`. Finding chats nearby still uses
+IPv4 only.
 
 It prints the server's safety code after connecting. To join a chat that has a room
 code, set it in the environment first rather than on the command line, where other
