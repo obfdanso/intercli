@@ -173,9 +173,43 @@ Good to know:
 ./server
 ```
 
-`server.exe` runs an open chat (no room code) on port 8080. It keeps its identity key in
-`%APPDATA%\intercli\server.key` (protected by Windows for your user; on Linux/macOS
-`~/.config/intercli/server.key`, owner-only) and prints its safety code when it starts.
+With no options, `server.exe` runs an open chat (no room code) on port 8080. It keeps its
+identity key in `%APPDATA%\intercli\server.key` (protected by Windows for your user; on
+Linux/macOS `~/.config/intercli/server.key`, owner-only) and prints its safety code when it
+starts.
+
+Options (`./server --help` lists them):
+
+| Option | What it does | Default |
+| --- | --- | --- |
+| `--port N` | Port to listen on, 1-65535 | 8080 |
+| `--room-code CODE` | Only people who know the code can join | open chat |
+| `--max-wrong-codes N` | Wrong room codes allowed per address before a lockout | 10 |
+| `--lockout SECONDS` | Length of the first lockout; each one after doubles, up to an hour | 60 |
+| `--log-level LEVEL` | `quiet`, `error` or `info` | `info` |
+| `--log-file FILE` | Add log lines to a file instead of printing them | console |
+| `--config FILE` | Read settings from a file | none |
+
+```bash
+./server --port 9000 --log-level error --log-file server.log
+```
+
+The room code can also be given in the `INTERCLI_ROOM_CODE` environment variable, which
+keeps it off the command line where other programs on the PC could see it.
+
+A config file has one `name = value` per line, named like the options without the dashes.
+Options given after `--config` override the file:
+
+```
+# intercli.conf
+port = 9000
+room-code = ABC-234
+log-level = info
+log-file = server.log
+```
+
+Log lines carry the time and a level (`INFO` or `ERROR`). They say who connected and who
+messaged whom, never what a message said.
 
 ### Connecting with the terminal client
 
