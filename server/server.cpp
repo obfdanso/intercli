@@ -22,7 +22,9 @@
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <ctime>
 #include <iostream>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -148,6 +150,9 @@ std::vector<uint8_t> load_or_create_identity() {
 }
 #endif
 
+// How much the server reports: nothing, only problems, or every event.
+enum class LogLevel { Quiet, Error, Info };
+
 // What can be set when starting the server. The defaults are an open chat
 // (no room code) on port 8080.
 struct Settings {
@@ -155,6 +160,8 @@ struct Settings {
     std::string room_code;
     int max_wrong_codes = 10;
     int lockout_seconds = 60;
+    LogLevel log_level = LogLevel::Info;
+    std::string log_file;  // empty: the console
 };
 
 void print_usage(const char* program) {
@@ -163,11 +170,27 @@ void print_usage(const char* program) {
               << "  --room-code CODE     only people who know CODE can join (default: open chat)\n"
               << "  --max-wrong-codes N  wrong room codes allowed per address before a lockout (default 10)\n"
               << "  --lockout SECONDS    length of the first lockout; each one after doubles (default 60)\n"
+              << "  --log-level LEVEL    quiet, error or info (default info)\n"
+              << "  --log-file FILE      add log lines to FILE instead of printing them\n"
               << "  --config FILE        read settings from FILE: one \"name = value\" per line,\n"
               << "                       named like these options; options after it override it\n"
               << "  --help               show this text\n"
               << "The room code can also come from the INTERCLI_ROOM_CODE environment variable,\n"
               << "which keeps it off the command line where other programs could see it." << std::endl;
+}
+
+// "2026-11-16 14:03:27", local time.
+std::string timestamp() {
+    const std::time_t now = std::time(nullptr);
+    std::tm local{};
+#ifdef _WIN32
+    localtime_s(&local, &now);
+#else
+    localtime_r(&now, &local);
+#endif
+    char text[32];
+    std::strftime(text, sizeof(text), "%Y-%m-%d %H:%M:%S", &local);
+    return text;
 }
 
 // A whole number within [low, high], or false.
@@ -209,6 +232,23 @@ bool apply_setting(const std::string& key, const std::string& value, Settings* s
             *error = "lockout must be a number of seconds from 1 to 3600";
             return false;
         }
+    } else if (key == "log-level") {
+        if (value == "quiet") {
+            settings->log_level = LogLevel::Quiet;
+        } else if (value == "error") {
+            settings->log_level = LogLevel::Error;
+        } else if (value == "info") {
+            settings->log_level = LogLevel::Info;
+        } else {
+            *error = "log-level must be quiet, error or info";
+            return false;
+        }
+    } else if (key == "log-file") {
+        if (value.empty()) {
+            *error = "log-file needs a file name";
+            return false;
+        }
+        settings->log_file = value;
     } else {
         *error = "unknown option: " + key;
         return false;
@@ -322,14 +362,30 @@ int main(int argc, char* argv[]) {
         options.max_wrong_codes_per_address = settings.max_wrong_codes;
         options.lockout = std::chrono::seconds(settings.lockout_seconds);
         options.identity_private = load_or_create_identity();
-        options.log = [](const std::string& line, bool is_error) {
-            (is_error ? std::cerr : std::cout) << line << std::endl;
+        std::ofstream log_file;
+        if (!settings.log_file.empty()) {
+            log_file.open(settings.log_file, std::ios::app);
+            if (!log_file) {
+                std::cerr << "Can't open the log file " << settings.log_file << std::endl;
+                return 2;
+            }
+        }
+        // Lines come from every client's thread; the mutex keeps them whole.
+        std::mutex log_mutex;
+        options.log = [&](const std::string& line, bool is_error) {
+            if (settings.log_level == LogLevel::Quiet || (!is_error && settings.log_level != LogLevel::Info)) {
+                return;
+            }
+            std::lock_guard<std::mutex> lock(log_mutex);
+            std::ostream& out = log_file.is_open() ? log_file : (is_error ? std::cerr : std::cout);
+            out << timestamp() << (is_error ? " ERROR " : " INFO  ") << line << std::endl;
         };
         SecureComm::SecureServer server(options);
 
         std::string error;
         if (!server.start(&error)) {
-            std::cerr << "Failed to start server" << std::endl;
+            // Always on the console, whatever the log settings.
+            std::cerr << "Failed to start server: " << error << std::endl;
             return 1;
         }
 
