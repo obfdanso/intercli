@@ -770,7 +770,7 @@ struct SecureServer::Impl {
 
         while (running_) {
             try {
-                std::vector<uint8_t> encrypted_data = receive_data(client_socket);
+                std::vector<uint8_t> encrypted_data = receive_data(client_socket, nullptr, &conn->alive);
                 if (encrypted_data.empty()) {
                     break; // Client disconnected
                 }
@@ -1117,16 +1117,19 @@ struct SecureServer::Impl {
         }
     }
 
-    // deadline, when given, is the latest the whole read may take.
+    // deadline, when given, is the latest the whole read may take. alive, when
+    // given, ends the read once the connection has been dropped: on Windows
+    // shutting our own socket down does not wake a wait for the peer's data.
     bool receive_all(intptr_t client_socket, uint8_t* data, size_t length,
-                     const std::chrono::steady_clock::time_point* deadline = nullptr) {
+                     const std::chrono::steady_clock::time_point* deadline = nullptr,
+                     const std::atomic<bool>* alive = nullptr) {
         size_t total = 0;
         while (total < length) {
             if (deadline && std::chrono::steady_clock::now() >= *deadline) {
                 return false;
             }
             const int ready = wait_readable(client_socket, 500);
-            if (ready < 0 || (ready == 0 && !running_)) {
+            if (ready < 0 || (ready == 0 && (!running_ || (alive && !*alive)))) {
                 return false;
             }
             if (ready == 0) {
@@ -1143,9 +1146,10 @@ struct SecureServer::Impl {
     }
 
     std::vector<uint8_t> receive_data(intptr_t client_socket,
-                                      const std::chrono::steady_clock::time_point* deadline = nullptr) {
+                                      const std::chrono::steady_clock::time_point* deadline = nullptr,
+                                      const std::atomic<bool>* alive = nullptr) {
         uint32_t length_be = 0;
-        if (!receive_all(client_socket, reinterpret_cast<uint8_t*>(&length_be), sizeof(length_be), deadline)) {
+        if (!receive_all(client_socket, reinterpret_cast<uint8_t*>(&length_be), sizeof(length_be), deadline, alive)) {
             return std::vector<uint8_t>();
         }
 
@@ -1155,7 +1159,7 @@ struct SecureServer::Impl {
         }
 
         std::vector<uint8_t> buffer(length);
-        if (!receive_all(client_socket, buffer.data(), length, deadline)) {
+        if (!receive_all(client_socket, buffer.data(), length, deadline, alive)) {
             return std::vector<uint8_t>();
         }
         return buffer;
