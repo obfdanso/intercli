@@ -26,8 +26,10 @@ QVariant ConversationListModel::data(const QModelIndex& index, int role) const {
         case LastActivityRole: return r.lastActivity;
         case UnreadRole: return r.unread;
         case SectionRole:
-            return r.id.isEmpty() ? QStringLiteral("everyone")
-                                  : (r.online ? QStringLiteral("online") : QStringLiteral("offline"));
+            return r.id.isEmpty()                    ? QStringLiteral("everyone")
+                 : r.id.startsWith(QLatin1Char('#')) ? QStringLiteral("rooms")
+                 : r.online                          ? QStringLiteral("online")
+                                                     : QStringLiteral("offline");
         default: return {};
     }
 }
@@ -44,10 +46,15 @@ QHash<int, QByteArray> ConversationListModel::roleNames() const {
     };
 }
 
-// Everyone first; then online before offline; then most recent activity; then name.
+// Everyone first; then rooms; then online before offline; then most recent activity; then name.
 bool ConversationListModel::sortsBefore(const Row& a, const Row& b) {
     if (a.id.isEmpty() != b.id.isEmpty()) {
         return a.id.isEmpty();
+    }
+    const bool a_room = a.id.startsWith(QLatin1Char('#'));
+    const bool b_room = b.id.startsWith(QLatin1Char('#'));
+    if (a_room != b_room) {
+        return a_room;
     }
     if (a.online != b.online) {
         return a.online;
@@ -158,6 +165,26 @@ void ConversationListModel::markRead(const QString& id) {
     }
     rows_[i].unread = 0;
     rowChanged(i);
+}
+
+void ConversationListModel::remove(const QString& id) {
+    const int i = indexOf(id);
+    if (i < 0 || rows_[i].id.isEmpty()) {
+        return;
+    }
+    beginRemoveRows(QModelIndex(), i, i);
+    rows_.removeAt(i);
+    endRemoveRows();
+}
+
+QStringList ConversationListModel::roomIds() const {
+    QStringList ids;
+    for (const Row& r : rows_) {
+        if (r.id.startsWith(QLatin1Char('#'))) {
+            ids.append(r.id);
+        }
+    }
+    return ids;
 }
 
 void ConversationListModel::clear() {

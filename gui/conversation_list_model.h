@@ -35,6 +35,10 @@ public:
     void setOnline(const QString& name, bool online);
     void touch(const QString& id, const QString& preview, const QDateTime& when, bool countUnread);
     void markRead(const QString& id);
+    // Takes a row out of the list (leaving a room). Everyone can't be removed.
+    void remove(const QString& id);
+    // The ids of the room rows ("#name").
+    QStringList roomIds() const;
     void clear();
 
     int onlineCount() const;
