@@ -163,6 +163,8 @@ void print_usage(const char* program) {
               << "  --room-code CODE     only people who know CODE can join (default: open chat)\n"
               << "  --max-wrong-codes N  wrong room codes allowed per address before a lockout (default 10)\n"
               << "  --lockout SECONDS    length of the first lockout; each one after doubles (default 60)\n"
+              << "  --config FILE        read settings from FILE: one \"name = value\" per line,\n"
+              << "                       named like these options; options after it override it\n"
               << "  --help               show this text\n"
               << "The room code can also come from the INTERCLI_ROOM_CODE environment variable,\n"
               << "which keeps it off the command line where other programs could see it." << std::endl;
@@ -214,7 +216,42 @@ bool apply_setting(const std::string& key, const std::string& value, Settings* s
     return true;
 }
 
+std::string trimmed(const std::string& text) {
+    const char* blank = " \t\r\n";
+    const size_t first = text.find_first_not_of(blank);
+    if (first == std::string::npos) {
+        return std::string();
+    }
+    return text.substr(first, text.find_last_not_of(blank) - first + 1);
+}
+
+// Reads a settings file: one "name = value" per line, with the same names as
+// the options. Blank lines and lines starting with # are skipped.
+bool load_config(const std::string& path, Settings* settings, std::string* error) {
+    std::ifstream in(path);
+    if (!in) {
+        *error = "can't open the config file " + path;
+        return false;
+    }
+    std::string line;
+    for (int number = 1; std::getline(in, line); ++number) {
+        line = trimmed(line);
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+        const size_t equals = line.find('=');
+        std::string reason = "expected name = value";
+        if (equals == std::string::npos ||
+            !apply_setting(trimmed(line.substr(0, equals)), trimmed(line.substr(equals + 1)), settings, &reason)) {
+            *error = path + " line " + std::to_string(number) + ": " + reason;
+            return false;
+        }
+    }
+    return true;
+}
+
 // Reads "--name value" and "--name=value" options. False with a reason on a mistake.
+// A --config file is read where it appears, so options after it override it.
 bool parse_arguments(int argc, char* argv[], Settings* settings, std::string* error) {
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -234,7 +271,9 @@ bool parse_arguments(int argc, char* argv[], Settings* settings, std::string* er
             *error = "--" + key + " needs a value";
             return false;
         }
-        if (!apply_setting(key, value, settings, error)) {
+        const bool ok = key == "config" ? load_config(value, settings, error)
+                                        : apply_setting(key, value, settings, error);
+        if (!ok) {
             return false;
         }
     }
