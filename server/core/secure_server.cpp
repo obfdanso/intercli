@@ -535,15 +535,46 @@ struct SecureServer::Impl {
         if (!conn) {
             return false;
         }
+        const std::string reason = "The host banned you from this chat";
+        // Never this PC's own address: the host joins from it too.
+        const bool ban_address = conn->address.rfind("127.", 0) != 0 && conn->address != "::1";
         {
             std::lock_guard<std::mutex> lock(admin_mutex_);
             banned_names_.insert(name);
-            // Never this PC's own address: the host joins from it too.
-            if (conn->address.rfind("127.", 0) != 0 && conn->address != "::1") {
+            if (ban_address) {
                 banned_addresses_.insert(conn->address);
             }
         }
-        return remove_person(name, "The host banned you from this chat");
+        if (ban_address) {
+            // Everything else that machine has open goes too, or it would stay
+            // in the chat under another name.
+            std::vector<std::shared_ptr<ClientConnection>> same_machine;
+            {
+                std::lock_guard<std::mutex> lock(connections_mutex_);
+                for (const auto& other : connections_) {
+                    if (other != conn && other->address == conn->address) {
+                        same_machine.push_back(other);
+                    }
+                }
+            }
+            for (const auto& other : same_machine) {
+                // Only a joined connection has keys set up for a notice.
+                bool joined = false;
+                {
+                    // The name is written under this lock when someone joins.
+                    std::lock_guard<std::mutex> lock(registry_mutex_);
+                    joined = !other->name.empty();
+                }
+                if (joined) {
+                    send_notice(other, reason);
+                }
+                std::lock_guard<std::mutex> lock(other->send_mutex);
+                if (other->alive) {
+                    drop_locked(other);
+                }
+            }
+        }
+        return remove_person(name, reason);
     }
 
     bool banned_name(const std::string& name) {
