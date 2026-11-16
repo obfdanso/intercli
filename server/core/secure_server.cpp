@@ -402,15 +402,23 @@ struct SecureServer::Impl {
 
             // An IPv4 client on the shared socket arrives as ::ffff:a.b.c.d; it
             // is named a.b.c.d, so one machine is one address for the lockouts.
-            char addr_text[INET6_ADDRSTRLEN] = "?";
+            char addr_text[INET6_ADDRSTRLEN + 4] = "?";
             uint16_t client_port = 0;
             if (client_addr.ss_family == AF_INET6) {
                 const auto* a = reinterpret_cast<const struct sockaddr_in6*>(&client_addr);
                 client_port = ntohs(a->sin6_port);
                 if (IN6_IS_ADDR_V4MAPPED(&a->sin6_addr)) {
                     inet_ntop(AF_INET, a->sin6_addr.s6_addr + 12, addr_text, sizeof(addr_text));
-                } else {
+                } else if (IN6_IS_ADDR_LOOPBACK(&a->sin6_addr)) {
                     inet_ntop(AF_INET6, &a->sin6_addr, addr_text, sizeof(addr_text));
+                } else {
+                    // One machine can use any address in its /64 network, so the
+                    // network is what gets counted and locked out: changing
+                    // address must not buy more room code guesses.
+                    struct in6_addr network = a->sin6_addr;
+                    std::memset(network.s6_addr + 8, 0, 8);
+                    inet_ntop(AF_INET6, &network, addr_text, sizeof(addr_text));
+                    std::strncat(addr_text, "/64", sizeof(addr_text) - std::strlen(addr_text) - 1);
                 }
             } else {
                 const auto* a = reinterpret_cast<const struct sockaddr_in*>(&client_addr);
