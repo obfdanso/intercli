@@ -313,6 +313,44 @@ static void room_code_tests() {
     check(open_ears.wait("registered:anyone"), "a server without a code ignores the code field");
 }
 
+// A client that records what it hears and whether it lost the connection.
+static ChatEvents listen(Ears& ears) {
+    ChatEvents ev;
+    ev.on_registered = [&ears](const std::string& n) { ears.add("registered:" + n); };
+    ev.on_register_failed = [&ears](const std::string& r) { ears.add("refused:" + r); };
+    ev.on_notice = [&ears](const std::string& t) { ears.add("notice:" + t); };
+    ev.on_presence = [&ears](const std::string& n, bool joined, const std::string&) {
+        ears.add("presence:" + n + (joined ? ":joined" : ":left"));
+    };
+    ev.on_disconnected = [&ears](const std::string&) {
+        { std::lock_guard<std::mutex> lock(ears.m); ears.lost = true; }
+        ears.cv.notify_all();
+    };
+    return ev;
+}
+
+static void host_control_tests() {
+    ServerOptions options;
+    options.port = 18130;
+    options.room_code = "ABC234";
+    Running hosted(options);
+    check(hosted.ok, "a server with a room code starts");
+
+    Ears host_ears, guest_ears;
+    ChatClient host(listen(host_ears)), guest(listen(guest_ears));
+    std::string error;
+    check(host.connect("127.0.0.1", 18130, &error) && guest.connect("127.0.0.1", 18130, &error), "two clients connect");
+    host.request_name("host", "ABC234");
+    guest.request_name("guest", "ABC234");
+    check(host_ears.wait("registered:host") && guest_ears.wait("registered:guest"), "both join");
+
+    check(!hosted.server.kick("nobody"), "kicking an unknown name does nothing");
+    check(hosted.server.kick("guest"), "kicking a member succeeds");
+    check(guest_ears.wait("notice:The host removed you from this chat"), "the kicked person is told why");
+    check(guest_ears.wait_lost(5000), "the kicked person is disconnected");
+    check(host_ears.wait("presence:guest:left"), "the others see them leave");
+}
+
 int main() {
     const uint16_t port = 18090;
 
@@ -370,6 +408,9 @@ int main() {
 
     std::cout << "Room code" << std::endl;
     room_code_tests();
+
+    std::cout << "Host controls" << std::endl;
+    host_control_tests();
 
     if (failures == 0) {
         std::cout << "All server core tests passed" << std::endl;

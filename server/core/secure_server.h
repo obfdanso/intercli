@@ -57,6 +57,11 @@ public:
     // client connection is closed before stop() returns.
     void stop();
 
+    // Host controls. Safe from any thread while the server runs.
+    // Removes someone from the chat: they are told why, then disconnected.
+    // They can join again. False if nobody has that name.
+    bool kick(const std::string& name);
+
     size_t people() const;  // registered names
     uint16_t port() const;
     std::vector<uint8_t> identity_public() const;

@@ -482,6 +482,26 @@ struct SecureServer::Impl {
         return identity_.public_raw;
     }
 
+    // Tells the person why, then cuts the connection; their own thread tidies
+    // up and announces that they left.
+    bool remove_person(const std::string& name, const std::string& reason) {
+        std::shared_ptr<ClientConnection> conn = lookup(name);
+        if (!conn) {
+            return false;
+        }
+        send_notice(conn, reason);
+        std::lock_guard<std::mutex> lock(conn->send_mutex);
+        if (conn->alive) {
+            drop_locked(conn);
+        }
+        LogLine(this, false) << "The host removed " << name;
+        return true;
+    }
+
+    bool kick(const std::string& name) {
+        return remove_person(name, "The host removed you from this chat");
+    }
+
     void handle_client(std::shared_ptr<ClientConnection> conn) {
         try {
             uint32_t client_id = generate_client_id();
@@ -1124,6 +1144,10 @@ void SecureServer::run() {
 
 void SecureServer::stop() {
     impl_->stop();
+}
+
+bool SecureServer::kick(const std::string& name) {
+    return impl_->kick(name);
 }
 
 size_t SecureServer::people() const {
