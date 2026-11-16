@@ -37,6 +37,10 @@ constexpr size_t MAX_PUBLIC_KEY_SIZE = 2048;
 constexpr size_t MAX_NAME_LEN = 32;
 constexpr size_t MAX_TEXT_LEN = 1024;
 constexpr size_t MAX_FRAME_SIZE = 65536;
+constexpr size_t MAX_FILE_SIZE = 8 * 1024 * 1024;
+constexpr size_t FILE_CHUNK_HEADER = 17;
+constexpr size_t FILE_CHUNK_DATA = MAX_TEXT_LEN - FILE_CHUNK_HEADER;
+constexpr size_t MAX_FILE_NAME_LEN = 255;
 // Each peer rotates the key it sends with after this many messages sent.
 constexpr uint32_t KEY_ROTATION_INTERVAL = 10;
 
@@ -90,6 +94,11 @@ enum class ChatType : uint8_t {
     ROOM_MESSAGE  = 0x0C,  // a message to the room's members
     ROOM_EVENT    = 0x0D,  // server: sender joined or left (text "joined" / "left")
     ROOM_LIST     = 0x0E,  // client asks; server answers "a, b, c"
+    // One piece of a file. The text is binary: kind ('d' direct, 'e' everyone,
+    // 'r' room), an 8-byte transfer id, then the piece number and the number
+    // of pieces (4 bytes each, little-endian). Piece 0 carries the size
+    // (8 bytes) and the file name; the rest carry the bytes in order.
+    FILE_CHUNK    = 0x0F,
 };
 
 // The four structs below travel on the wire as raw bytes, so every compiler

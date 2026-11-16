@@ -933,6 +933,55 @@ struct SecureServer::Impl {
                         continue;
                     }
 
+                    if (chat.type == ChatType::FILE_CHUNK) {
+                        // Relayed like the kind of message it rides on; the
+                        // server never puts the pieces together.
+                        const std::string body = get_chat_text(chat);
+                        if (body.size() < FILE_CHUNK_HEADER) {
+                            continue;
+                        }
+                        const std::string to = get_chat_field(chat.recipient, MAX_NAME_LEN);
+                        // Only the first piece earns a notice, or a refused
+                        // file would bring one back for every piece.
+                        const bool first = body[9] == 0 && body[10] == 0 && body[11] == 0 && body[12] == 0;
+                        std::vector<std::shared_ptr<ClientConnection>> targets;
+                        if (body[0] == 'd') {
+                            std::shared_ptr<ClientConnection> target = lookup(to);
+                            if (!target) {
+                                if (first) {
+                                    send_notice(conn, "No such user: " + to);
+                                }
+                                continue;
+                            }
+                            targets.push_back(target);
+                        } else if (body[0] == 'r') {
+                            targets = room_members(to);
+                            if (std::find(targets.begin(), targets.end(), conn) == targets.end()) {
+                                if (first) {
+                                    send_notice(conn, "You are not in the room " + to);
+                                }
+                                continue;
+                            }
+                        } else if (body[0] == 'e') {
+                            targets = roster_snapshot();
+                        } else {
+                            continue;
+                        }
+                        ChatMessage out = make_chat(ChatType::FILE_CHUNK);
+                        set_chat_field(out.sender, MAX_NAME_LEN, conn->name);
+                        set_chat_field(out.recipient, MAX_NAME_LEN, to);
+                        set_chat_text(out, body);
+                        for (const auto& target : targets) {
+                            if (target != conn) {
+                                send_chat(target, out);
+                            }
+                        }
+                        if (first) {
+                            LogLine(this, false) << conn->name << " is sending a file";
+                        }
+                        continue;
+                    }
+
                     if (chat.type == ChatType::ROOM_JOIN) {
                         const std::string room = get_chat_field(chat.recipient, MAX_NAME_LEN);
                         bool added = false;
