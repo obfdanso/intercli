@@ -342,6 +342,20 @@ Older (version 1) clients or servers are refused with a message asking to update
 - The host can make a new code at any time from the details panel; it applies to people
   who join from then on.
 
+### Rooms
+
+Inside a chat, anyone can make a room for a smaller group. A room exists while someone
+is in it: joining a room nobody is in creates it, and it is gone when the last person
+leaves. Only a room's members get its messages. Rooms have no code of their own; anyone
+in the chat can list them and join. A chat can have up to 64 rooms, and one person can
+be in 16.
+
+- **Desktop app:** type a name in "Join or create a room" at the bottom of the sidebar.
+  Rooms are listed as `#name` under ROOMS; "Leave Room" is in the details panel.
+- **Terminal client:** `/join room`, `#room message`, `/leave room`, `/rooms`.
+
+Names (of people and rooms) can no longer start with `#`.
+
 ### Host controls (desktop app)
 
 With someone's conversation open, the host's details panel can:
