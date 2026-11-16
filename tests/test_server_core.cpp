@@ -319,6 +319,17 @@ static ChatEvents listen(Ears& ears) {
     ev.on_registered = [&ears](const std::string& n) { ears.add("registered:" + n); };
     ev.on_register_failed = [&ears](const std::string& r) { ears.add("refused:" + r); };
     ev.on_notice = [&ears](const std::string& t) { ears.add("notice:" + t); };
+    ev.on_room_message = [&ears](const std::string& room, const std::string& from, const std::string& t) {
+        ears.add("room:" + room + ":" + from + ":" + t);
+    };
+    ev.on_room_event = [&ears](const std::string& room, const std::string& n, bool joined) {
+        ears.add("roomevent:" + room + ":" + n + (joined ? ":joined" : ":left"));
+    };
+    ev.on_room_list = [&ears](const std::vector<std::string>& rooms) {
+        std::string all;
+        for (const auto& r : rooms) all += (all.empty() ? "" : ",") + r;
+        ears.add("rooms:" + all);
+    };
     ev.on_presence = [&ears](const std::string& n, bool joined, const std::string&) {
         ears.add("presence:" + n + (joined ? ":joined" : ":left"));
     };
@@ -383,6 +394,63 @@ static void host_control_tests() {
     check(!open_server.server.set_room_code("ABC234"), "an open server cannot gain a room code while running");
 }
 
+static void room_tests() {
+    ServerOptions options;
+    options.port = 18132;
+    Running server(options);
+    check(server.ok, "a server starts");
+
+    Ears a_ears, b_ears, c_ears;
+    ChatClient a(listen(a_ears)), b(listen(b_ears)), c(listen(c_ears));
+    std::string error;
+    check(a.connect("127.0.0.1", 18132, &error) && b.connect("127.0.0.1", 18132, &error) &&
+          c.connect("127.0.0.1", 18132, &error), "three clients connect");
+    a.request_name("#ann");
+    check(a_ears.wait("refused:Name must be 1-31 printable characters with no spaces, not starting with #"),
+          "a name starting with # is refused");
+    a.request_name("ann");
+    b.request_name("ben");
+    c.request_name("cat");
+    check(a_ears.wait("registered:ann") && b_ears.wait("registered:ben") && c_ears.wait("registered:cat"),
+          "all three join the chat");
+
+    check(a.join_room("dev"), "joining a room is sent");
+    check(a_ears.wait("roomevent:dev:ann:joined"), "the first to join creates the room and is told");
+    b.join_room("dev");
+    check(a_ears.wait("roomevent:dev:ben:joined") && b_ears.wait("roomevent:dev:ben:joined"),
+          "members and the joiner hear a join");
+
+    a.send_room("dev", "hello room");
+    check(b_ears.wait("room:dev:ann:hello room"), "a member gets a room message");
+    c.send_room("dev", "let me in");
+    check(c_ears.wait("notice:You are not in the room dev"), "someone outside the room can't post to it");
+    check(!c_ears.heard("room:dev:ann:hello room") && !b_ears.heard("room:dev:cat:let me in"),
+          "and neither hears nor is heard");
+    check(!a_ears.heard("room:dev:ann:hello room"), "the sender gets no copy");
+
+    c.request_rooms();
+    check(c_ears.wait("rooms:dev"), "the rooms can be listed");
+    check(!a.join_room("#bad") && !a.join_room("two words"), "bad room names are not sent");
+
+    b.leave_room("dev");
+    check(a_ears.wait("roomevent:dev:ben:left") && b_ears.wait("roomevent:dev:ben:left"),
+          "members and the leaver hear a leave");
+    b.send_room("dev", "still here?");
+    check(b_ears.wait("notice:You are not in the room dev"), "after leaving, posting is refused");
+
+    // Someone who disconnects leaves their rooms.
+    c.join_room("dev");
+    check(a_ears.wait("roomevent:dev:cat:joined"), "a third person joins");
+    c.disconnect();
+    check(a_ears.wait("roomevent:dev:cat:left"), "disconnecting leaves the room");
+
+    // A room is gone once it is empty.
+    a.leave_room("dev");
+    check(a_ears.wait("roomevent:dev:ann:left"), "the last member leaves");
+    b.request_rooms();
+    check(b_ears.wait("rooms:"), "an empty room no longer exists");
+}
+
 int main() {
     const uint16_t port = 18090;
 
@@ -443,6 +511,9 @@ int main() {
 
     std::cout << "Host controls" << std::endl;
     host_control_tests();
+
+    std::cout << "Named rooms" << std::endl;
+    room_tests();
 
     if (failures == 0) {
         std::cout << "All server core tests passed" << std::endl;
