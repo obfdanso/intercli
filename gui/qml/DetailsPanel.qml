@@ -29,6 +29,43 @@ Rectangle {
         onTriggered: panel.tick++
     }
 
+    // A small text button for the host's controls; works from the keyboard too.
+    component HostButton: Rectangle {
+        id: hostButton
+        property string label
+        property string accessibleName: label
+        property bool danger: false
+        signal pressed()
+        signal movedAway()
+        width: hostButtonText.implicitWidth + 18
+        height: 26
+        radius: 7
+        color: hostButtonMouse.containsMouse || activeFocus ? Theme.raised2 : Qt.rgba(1, 1, 1, 0.06)
+        activeFocusOnTab: true
+        Keys.onReturnPressed: pressed()
+        Keys.onEnterPressed: pressed()
+        Keys.onSpacePressed: pressed()
+        onActiveFocusChanged: if (!activeFocus && !hostButtonMouse.containsMouse) movedAway()
+        Accessible.role: Accessible.Button
+        Accessible.name: accessibleName
+        Accessible.onPressAction: pressed()
+        Text {
+            id: hostButtonText
+            textFormat: Text.PlainText
+            anchors.centerIn: parent
+            text: hostButton.label
+            color: hostButton.danger ? Theme.danger : Theme.accent
+            font.pixelSize: 12
+        }
+        MouseArea {
+            id: hostButtonMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            onClicked: hostButton.pressed()
+            onExited: hostButton.movedAway()
+        }
+    }
+
     component Row2: Item {
         property string label
         property string value
@@ -205,6 +242,20 @@ Rectangle {
                                 onExited: copyText.text = "Copy"
                             }
                         }
+                        HostButton {
+                            anchors.verticalCenter: parent.verticalCenter
+                            label: "New Code"
+                            accessibleName: "Make a new room code"
+                            onPressed: Chat.changeRoomCode()
+                        }
+                    }
+                    Text {
+                        textFormat: Text.PlainText
+                        width: parent.width
+                        wrapMode: Text.Wrap
+                        text: "A new code only affects people who join from now on."
+                        color: Theme.textTertiary
+                        font.pixelSize: 11
                     }
                     Text {
                         textFormat: Text.PlainText
@@ -218,6 +269,40 @@ Rectangle {
                         width: parent.width
                         wrapMode: Text.Wrap
                         text: "For Join by address: " + Chat.hostAddress
+                        color: Theme.textTertiary
+                        font.pixelSize: 11
+                    }
+                    // With someone's conversation open, the host can remove them.
+                    Row {
+                        visible: !panel.everyone && panel.peerOnline
+                        spacing: 8
+                        topPadding: 4
+                        HostButton {
+                            label: "Remove " + panel.peer
+                            accessibleName: "Remove " + panel.peer + " from the chat"
+                            danger: true
+                            onPressed: Chat.kickPerson(panel.peer)
+                        }
+                        HostButton {
+                            // Two presses, so a slip doesn't lock someone out.
+                            property bool armed: false
+                            label: armed ? "Really ban?" : "Ban"
+                            accessibleName: armed ? "Confirm banning " + panel.peer : "Ban " + panel.peer + " from the chat"
+                            danger: true
+                            onPressed: {
+                                if (armed)
+                                    Chat.banPerson(panel.peer)
+                                armed = !armed
+                            }
+                            onMovedAway: armed = false
+                        }
+                    }
+                    Text {
+                        textFormat: Text.PlainText
+                        visible: !panel.everyone && panel.peerOnline
+                        width: parent.width
+                        wrapMode: Text.Wrap
+                        text: "Removed people can join again. A ban lasts until you end the chat."
                         color: Theme.textTertiary
                         font.pixelSize: 11
                     }
