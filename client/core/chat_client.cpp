@@ -487,7 +487,127 @@ bool ChatClient::rotate_send_key() {
     return ok;
 }
 
-bool ChatClient::send_chat(const ChatMessage& chat) {
+namespace {
+
+void put_number(std::string& out, uint64_t value, int bytes) {
+    for (int i = 0; i < bytes; ++i) {
+        out.push_back(static_cast<char>(value >> (8 * i)));
+    }
+}
+
+uint64_t get_number(const std::string& in, size_t at, int bytes) {
+    uint64_t value = 0;
+    for (int i = 0; i < bytes; ++i) {
+        value |= static_cast<uint64_t>(static_cast<unsigned char>(in[at + i])) << (8 * i);
+    }
+    return value;
+}
+
+uint32_t pieces_for(uint64_t size) {
+    return 1 + static_cast<uint32_t>((size + FILE_CHUNK_DATA - 1) / FILE_CHUNK_DATA);
+}
+
+constexpr size_t kMaxIncomingFiles = 4;
+
+} // namespace
+
+bool ChatClient::send_file(FileTarget target, const std::string& to, const std::string& name,
+                           const std::vector<uint8_t>& data) {
+    if (data.size() > MAX_FILE_SIZE || name.empty() || name.size() > MAX_FILE_NAME_LEN) {
+        return false;
+    }
+    if (target != FileTarget::Everyone && !is_valid_name(to)) {
+        return false;
+    }
+    const char kind = target == FileTarget::Direct ? 'd' : target == FileTarget::Room ? 'r' : 'e';
+    const std::vector<uint8_t> id = crypto_->generate_random_bytes(8);
+    const uint32_t total = pieces_for(data.size());
+    for (uint32_t seq = 0; seq < total; ++seq) {
+        std::string body(1, kind);
+        body.append(id.begin(), id.end());
+        put_number(body, seq, 4);
+        put_number(body, total, 4);
+        if (seq == 0) {
+            put_number(body, data.size(), 8);
+            body += name;
+        } else {
+            const size_t offset = static_cast<size_t>(seq - 1) * FILE_CHUNK_DATA;
+            const size_t length = (std::min)(FILE_CHUNK_DATA, data.size() - offset);
+            body.append(reinterpret_cast<const char*>(data.data()) + offset, length);
+        }
+        ChatMessage msg = make_chat(ChatType::FILE_CHUNK);
+        if (target != FileTarget::Everyone) {
+            set_chat_field(msg.recipient, MAX_NAME_LEN, to);
+        }
+        set_chat_text(msg, body);
+        if (!send_chat(msg, true)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Everything here comes from another person, so every number is checked and a
+// transfer that steps out of line is dropped.
+void ChatClient::handle_file_chunk(const ChatMessage& msg, const std::string& from, const std::string& body) {
+    if (body.size() < FILE_CHUNK_HEADER) {
+        return;
+    }
+    const char kind = body[0];
+    const std::string key = from + '\0' + body.substr(1, 8);
+    const uint32_t seq = static_cast<uint32_t>(get_number(body, 9, 4));
+    const uint32_t total = static_cast<uint32_t>(get_number(body, 13, 4));
+
+    if (seq == 0) {
+        if (body.size() < FILE_CHUNK_HEADER + 9 || (kind != 'd' && kind != 'e' && kind != 'r')) {
+            return;
+        }
+        IncomingFile file;
+        file.kind = kind;
+        file.size = get_number(body, FILE_CHUNK_HEADER, 8);
+        file.name = body.substr(FILE_CHUNK_HEADER + 8);
+        file.total = total;
+        if (file.size > MAX_FILE_SIZE || file.name.size() > MAX_FILE_NAME_LEN || total != pieces_for(file.size)) {
+            return;
+        }
+        if (kind == 'r') {
+            file.room = get_chat_field(msg.recipient, MAX_NAME_LEN);
+        }
+        // Abandoned transfers must not hold the few slots for ever.
+        if (incoming_files_.size() >= kMaxIncomingFiles && incoming_files_.count(key) == 0) {
+            incoming_files_.erase(incoming_files_.begin());
+        }
+        file.data.reserve(static_cast<size_t>(file.size));
+        incoming_files_[key] = std::move(file);
+    } else {
+        const auto it = incoming_files_.find(key);
+        if (it == incoming_files_.end()) {
+            return;
+        }
+        IncomingFile& file = it->second;
+        const size_t length = body.size() - FILE_CHUNK_HEADER;
+        if (seq != file.next || total != file.total || file.data.size() + length > file.size) {
+            incoming_files_.erase(it);
+            return;
+        }
+        file.data.insert(file.data.end(), body.begin() + FILE_CHUNK_HEADER, body.end());
+        ++file.next;
+    }
+
+    const auto it = incoming_files_.find(key);
+    if (it == incoming_files_.end() || it->second.next != it->second.total) {
+        return;
+    }
+    IncomingFile file = std::move(it->second);
+    incoming_files_.erase(it);
+    if (file.data.size() == file.size && events_.on_file) {
+        const FileTarget target = file.kind == 'd' ? FileTarget::Direct
+                                : file.kind == 'r' ? FileTarget::Room : FileTarget::Everyone;
+        events_.on_file(from, target, file.room, file.name, file.data);
+    }
+}
+
+bool ChatClient::send_chat(const ChatMessage& chat, bool quiet) {
     if (!connected_) {
         return false;
     }
@@ -519,7 +639,7 @@ bool ChatClient::send_chat(const ChatMessage& chat) {
         }
     }
 
-    if (rotated && events_.on_send_key_rotated) {
+    if (rotated && !quiet && events_.on_send_key_rotated) {
         events_.on_send_key_rotated();
     }
     return true;
@@ -629,6 +749,9 @@ void ChatClient::handle_chat(const ChatMessage& msg) {
             break;
         case ChatType::NOTICE:
             if (events_.on_notice) events_.on_notice(text);
+            break;
+        case ChatType::FILE_CHUNK:
+            handle_file_chunk(msg, from, text);
             break;
         case ChatType::ROOM_MESSAGE:
             if (events_.on_room_message) {

@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -19,6 +20,9 @@
 namespace SecureComm {
 
 class CryptoManager;
+
+// Where a file goes, or came in from.
+enum class FileTarget { Direct, Everyone, Room };
 
 // Every callback runs on the client's receive thread, except on_send_key_rotated,
 // which runs on whichever thread sent the message that triggered the rotation.
@@ -35,6 +39,10 @@ struct ChatEvents {
     std::function<void(const std::string& room, const std::string& from, const std::string& text)> on_room_message;
     std::function<void(const std::string& room, const std::string& name, bool joined)> on_room_event;
     std::function<void(const std::vector<std::string>& rooms)> on_room_list;
+    // A whole file has arrived. room is set for FileTarget::Room. name is
+    // whatever the sender chose: clean it before using it as a file name.
+    std::function<void(const std::string& from, FileTarget target, const std::string& room,
+                       const std::string& name, const std::vector<uint8_t>& data)> on_file;
     std::function<void(const std::string& text)> on_notice;
     std::function<void(const std::string& text)> on_server_error;
     std::function<void()> on_send_key_rotated;
@@ -97,6 +105,13 @@ public:
     bool leave_room(const std::string& room);
     bool send_room(const std::string& room, const std::string& text);
     bool request_rooms();
+
+    // Sends a file of up to MAX_FILE_SIZE bytes in pieces. Blocking, so call it
+    // off the UI thread; other messages can be sent meanwhile. to is the
+    // person or room (unused for Everyone). False if it is too big, the name
+    // is empty or over 255 bytes, or the connection fails part-way.
+    bool send_file(FileTarget target, const std::string& to, const std::string& name,
+                   const std::vector<uint8_t>& data);
     bool rotate_send_key();
 
     bool connected() const;
@@ -112,7 +127,9 @@ public:
     void fail_receive_for_test();
 
 private:
-    bool send_chat(const ChatMessage& chat);
+    // quiet: don't report key rotations (a file would report hundreds).
+    bool send_chat(const ChatMessage& chat, bool quiet = false);
+    void handle_file_chunk(const ChatMessage& msg, const std::string& from, const std::string& body);
     bool rotate_locked();
     std::vector<uint8_t> seal_frame(MessageType type, const std::vector<uint8_t>& plain);
     bool open_frame(const std::vector<uint8_t>& frame, std::vector<uint8_t>* plain);
@@ -156,6 +173,18 @@ private:
     std::vector<uint8_t> rx_key_;
     uint32_t receive_rotations_ = 0;
     uint32_t rx_seq_ = 0;  // last frame number received; receive thread only
+
+    // Files being received, by sender and transfer id; receive thread only.
+    struct IncomingFile {
+        char kind = 'd';
+        std::string room;
+        std::string name;
+        uint64_t size = 0;
+        uint32_t total = 0;
+        uint32_t next = 1;
+        std::vector<uint8_t> data;
+    };
+    std::map<std::string, IncomingFile> incoming_files_;
 
     std::vector<uint8_t> expected_identity_;
     std::vector<uint8_t> server_identity_;
