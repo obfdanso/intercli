@@ -122,7 +122,9 @@ struct ClientConnection {
     uint32_t          tx_seq = 0;      // last frame number sent; guarded by send_mutex
     uint32_t          rx_seq = 0;      // last frame number received; receive thread only
     int               wrong_codes = 0; // wrong room codes tried; receive thread only
-    std::string       address;         // the client's IP address
+    std::string       address;         // what guesses are counted against: the IP
+                                       // address, or the /64 network for IPv6
+    std::string       peer;            // the client's exact IP address, for bans
     bool              counted_joined = false;  // released from the pending count
     std::atomic<bool> alive{true};
 };
@@ -426,6 +428,7 @@ struct SecureServer::Impl {
             // An IPv4 client on the shared socket arrives as ::ffff:a.b.c.d; it
             // is named a.b.c.d, so one machine is one address for the lockouts.
             char addr_text[INET6_ADDRSTRLEN + 4] = "?";
+            char exact_text[INET6_ADDRSTRLEN] = "";  // set only where it differs
             uint16_t client_port = 0;
             if (client_addr.ss_family == AF_INET6) {
                 const auto* a = reinterpret_cast<const struct sockaddr_in6*>(&client_addr);
@@ -443,6 +446,7 @@ struct SecureServer::Impl {
                     // One machine can use any address in its /64 network, so the
                     // network is what gets counted and locked out: changing
                     // address must not buy more room code guesses.
+                    inet_ntop(AF_INET6, &a->sin6_addr, exact_text, sizeof(exact_text));
                     struct in6_addr network = a->sin6_addr;
                     std::memset(network.s6_addr + 8, 0, 8);
                     inet_ntop(AF_INET6, &network, addr_text, sizeof(addr_text));
@@ -464,6 +468,7 @@ struct SecureServer::Impl {
             auto conn = std::make_shared<ClientConnection>();
             conn->socket = client_socket;
             conn->address = addr_text;
+            conn->peer = exact_text[0] ? exact_text : addr_text;
             // A client that stops reading must not hold a relay forever.
             set_send_timeout(client_socket, 5000);
             {
@@ -537,12 +542,14 @@ struct SecureServer::Impl {
         }
         const std::string reason = "The host banned you from this chat";
         // Never this PC's own address: the host joins from it too.
-        const bool ban_address = conn->address.rfind("127.", 0) != 0 && conn->address != "::1";
+        // The exact address, not the network guesses are counted against: a
+        // ban must not take the person's neighbours with it.
+        const bool ban_address = conn->peer.rfind("127.", 0) != 0 && conn->peer != "::1";
         {
             std::lock_guard<std::mutex> lock(admin_mutex_);
             banned_names_.insert(name);
             if (ban_address) {
-                banned_addresses_.insert(conn->address);
+                banned_addresses_.insert(conn->peer);
             }
         }
         if (ban_address) {
@@ -552,7 +559,7 @@ struct SecureServer::Impl {
             {
                 std::lock_guard<std::mutex> lock(connections_mutex_);
                 for (const auto& other : connections_) {
-                    if (other != conn && other->address == conn->address) {
+                    if (other != conn && other->peer == conn->peer) {
                         same_machine.push_back(other);
                     }
                 }
@@ -817,7 +824,7 @@ struct SecureServer::Impl {
                         // A banned address is told why (rather than seeing a
                         // dead line) and cut off before its room code is even
                         // looked at, so it learns nothing about the code.
-                        if (banned_address(conn->address)) {
+                        if (banned_address(conn->peer)) {
                             ChatMessage refusal = make_chat(ChatType::REGISTER_FAIL);
                             set_chat_text(refusal, "The host banned you from this chat");
                             send_chat(conn, refusal);
