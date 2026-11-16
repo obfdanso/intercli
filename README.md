@@ -339,6 +339,16 @@ Older (version 1) clients or servers are refused with a message asking to update
 - Each wrong code waits a second; five on one connection close it; ten from one
   address lock that address out (for a minute, doubling each time, up to an hour).
   An address can have at most 8 connections that haven't joined.
+- The host can make a new code at any time from the details panel; it applies to people
+  who join from then on.
+
+### Host controls (desktop app)
+
+With someone's conversation open, the host's details panel can:
+
+- **Remove** them: they are told the host removed them and disconnected, and can join again.
+- **Ban** them: the same, but their name and their address (unless it is the host's own
+  PC) are refused until the host ends the chat. Bans are not kept between sessions.
 
 ### Finding chats nearby
 
