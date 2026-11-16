@@ -39,6 +39,12 @@ public:
     int people() const { return people_; }
     // Asks the server right now (people() is refreshed every couple of seconds).
     int peopleNow() const;
+    // Host controls; false when not hosting or nobody has that name.
+    bool kick(const QString& name);
+    bool ban(const QString& name);  // lasts until the chat is stopped
+    // Makes a new room code for people who join from now on, and keeps it for
+    // next time. False when not hosting.
+    bool newRoomCode();
     QByteArray identityPublic() const { return identity_public_; }
     QString safetyCode() const;
 

@@ -120,6 +120,13 @@ public:
     // The code that worked last time for this chat, formatted, or empty.
     Q_INVOKABLE QString rememberedCode(const QString& chatId) const;
     Q_INVOKABLE void copyRoomCode() const;
+    // Host only. Removes someone from the chat (they can join again), or bans
+    // them until the chat ends. False when not hosting, for yourself, or for a
+    // name nobody has.
+    Q_INVOKABLE bool kickPerson(const QString& name);
+    Q_INVOKABLE bool banPerson(const QString& name);
+    // Host only. A new room code for whoever joins from now on.
+    Q_INVOKABLE void changeRoomCode();
     Q_INVOKABLE void refreshNetworkCheck();
     // After comparing the new safety code with the host: remember the new
     // identity for this chat and join again.

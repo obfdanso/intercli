@@ -434,6 +434,30 @@ private slots:
         joiner.reconnect();
         QTRY_COMPARE_WITH_TIMEOUT(joiner.state(), ChatController::Online, kWait);
 
+        // Host controls. Removing someone disconnects them, and they can come back.
+        QVERIFY(!host.kickPerson("hana"));  // never yourself
+        QVERIFY(!host.kickPerson("nobody"));
+        QVERIFY(!joiner.kickPerson("hana"));  // only the host can
+        QVERIFY(host.kickPerson("jojo"));
+        QTRY_COMPARE_WITH_TIMEOUT(joiner.state(), ChatController::Disconnected, kWait);
+        joiner.reconnect();
+        QTRY_COMPARE_WITH_TIMEOUT(joiner.state(), ChatController::Online, kWait);
+
+        // A new room code is shown to the host and kept for next time.
+        const QString oldCode = host.roomCode();
+        host.changeRoomCode();
+        QCOMPARE(host.roomCode().size(), 7);
+        QVERIFY(host.roomCode() != oldCode);
+        QCOMPARE(host.roomCode().remove('-'), hosting.roomCode());
+        QCOMPARE(host.state(), ChatController::Online);
+
+        // A banned person is disconnected and can't get back in.
+        QVERIFY(host.banPerson("jojo"));
+        QTRY_COMPARE_WITH_TIMEOUT(joiner.state(), ChatController::Disconnected, kWait);
+        joiner.reconnect();
+        QTRY_COMPARE_WITH_TIMEOUT(joiner.state(), ChatController::Disconnected, kWait);
+        QVERIFY2(joiner.needsSignIn(), qPrintable(joiner.disconnectReason()));
+
         // The host ends the chat: the joiner is disconnected.
         host.endChat();
         QCOMPARE(host.state(), ChatController::SignedOut);

@@ -117,6 +117,28 @@ void HostSession::stop() {
     }
 }
 
+bool HostSession::kick(const QString& name) {
+    return server_ && server_->kick(name.toStdString());
+}
+
+bool HostSession::ban(const QString& name) {
+    return server_ && server_->ban(name.toStdString());
+}
+
+bool HostSession::newRoomCode() {
+    if (!server_) {
+        return false;
+    }
+    SecureComm::CryptoManager crypto;
+    const QString code = QString::fromStdString(crypto.generate_room_code());
+    if (!server_->set_room_code(code.toStdString())) {
+        return false;
+    }
+    room_code_ = code;
+    QSettings().setValue("host/roomCode", room_code_);
+    return true;
+}
+
 int HostSession::peopleNow() const {
     return server_ ? static_cast<int>(server_->people()) : 0;
 }

@@ -410,6 +410,26 @@ QString ChatController::rememberedCode(const QString& chatId) const {
     return code.isEmpty() ? QString() : QString::fromStdString(SecureComm::format_room_code(ss(code)));
 }
 
+bool ChatController::kickPerson(const QString& name) {
+    return hosting_ && host_session_ && name != my_name_ && host_session_->kick(name);
+}
+
+bool ChatController::banPerson(const QString& name) {
+    return hosting_ && host_session_ && name != my_name_ && host_session_->ban(name);
+}
+
+void ChatController::changeRoomCode() {
+    if (!hosting_ || !host_session_ || !host_session_->newRoomCode()) {
+        return;
+    }
+    // Our own reconnects need the new code too.
+    room_code_ = host_session_->roomCode();
+    if (!chat_id_.isEmpty()) {
+        QSettings().setValue("codes/" + chat_id_, room_code_);
+    }
+    emit hostingChanged();
+}
+
 void ChatController::copyRoomCode() const {
     if (QClipboard* clipboard = QGuiApplication::clipboard()) {
         clipboard->setText(roomCode());
