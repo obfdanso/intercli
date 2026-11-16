@@ -783,6 +783,15 @@ struct SecureServer::Impl {
                     if (chat.type == ChatType::REGISTER) {
                         // The room code comes first, so someone without it cannot
                         // even learn which names are taken.
+                        // A banned address is told why (rather than seeing a
+                        // dead line) and cut off before its room code is even
+                        // looked at, so it learns nothing about the code.
+                        if (banned_address(conn->address)) {
+                            ChatMessage refusal = make_chat(ChatType::REGISTER_FAIL);
+                            set_chat_text(refusal, "The host banned you from this chat");
+                            send_chat(conn, refusal);
+                            break;
+                        }
                         if (!options_.room_code.empty() && !begin_guess(conn->address)) {
                             ChatMessage refusal = make_chat(ChatType::REGISTER_FAIL);
                             set_chat_text(refusal, "Too many wrong room codes. Try again later.");
@@ -811,9 +820,7 @@ struct SecureServer::Impl {
                         std::string reason;
                         if (!is_valid_name(wanted)) {
                             reason = "Name must be 1-31 printable characters with no spaces";
-                        } else if (banned_name(wanted) || banned_address(conn->address)) {
-                            // Refused here rather than when connecting, so the
-                            // person is told why instead of seeing a dead line.
+                        } else if (banned_name(wanted)) {
                             reason = "The host banned you from this chat";
                         } else if (!conn->name.empty()) {
                             reason = "Already registered as " + conn->name;
