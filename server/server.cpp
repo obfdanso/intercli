@@ -23,6 +23,7 @@
 #include <chrono>
 #include <csignal>
 #include <iostream>
+#include <string>
 #include <thread>
 
 namespace {
@@ -147,9 +148,123 @@ std::vector<uint8_t> load_or_create_identity() {
 }
 #endif
 
+// What can be set when starting the server. The defaults are an open chat
+// (no room code) on port 8080.
+struct Settings {
+    int port = SecureComm::DEFAULT_PORT;
+    std::string room_code;
+    int max_wrong_codes = 10;
+    int lockout_seconds = 60;
+};
+
+void print_usage(const char* program) {
+    std::cout << "Usage: " << program << " [options]\n"
+              << "  --port N             port to listen on, 1-65535 (default 8080)\n"
+              << "  --room-code CODE     only people who know CODE can join (default: open chat)\n"
+              << "  --max-wrong-codes N  wrong room codes allowed per address before a lockout (default 10)\n"
+              << "  --lockout SECONDS    length of the first lockout; each one after doubles (default 60)\n"
+              << "  --help               show this text\n"
+              << "The room code can also come from the INTERCLI_ROOM_CODE environment variable,\n"
+              << "which keeps it off the command line where other programs could see it." << std::endl;
+}
+
+// A whole number within [low, high], or false.
+bool parse_number(const std::string& text, int low, int high, int* out) {
+    try {
+        size_t used = 0;
+        const int value = std::stoi(text, &used);
+        if (used != text.size() || value < low || value > high) {
+            return false;
+        }
+        *out = value;
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+// Applies one setting by name. False with a reason when the name or value is wrong.
+bool apply_setting(const std::string& key, const std::string& value, Settings* settings, std::string* error) {
+    if (key == "port") {
+        if (!parse_number(value, 1, 65535, &settings->port)) {
+            *error = "port must be a number from 1 to 65535";
+            return false;
+        }
+    } else if (key == "room-code") {
+        if (SecureComm::normalize_room_code(value).empty() ||
+            SecureComm::normalize_room_code(value).size() >= SecureComm::MAX_NAME_LEN) {
+            *error = "room-code must be 1 to 31 letters or digits";
+            return false;
+        }
+        settings->room_code = value;
+    } else if (key == "max-wrong-codes") {
+        if (!parse_number(value, 1, 1000, &settings->max_wrong_codes)) {
+            *error = "max-wrong-codes must be a number from 1 to 1000";
+            return false;
+        }
+    } else if (key == "lockout") {
+        if (!parse_number(value, 1, 3600, &settings->lockout_seconds)) {
+            *error = "lockout must be a number of seconds from 1 to 3600";
+            return false;
+        }
+    } else {
+        *error = "unknown option: " + key;
+        return false;
+    }
+    return true;
+}
+
+// Reads "--name value" and "--name=value" options. False with a reason on a mistake.
+bool parse_arguments(int argc, char* argv[], Settings* settings, std::string* error) {
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg.rfind("--", 0) != 0) {
+            *error = "unexpected argument: " + arg;
+            return false;
+        }
+        std::string key = arg.substr(2);
+        std::string value;
+        const size_t equals = key.find('=');
+        if (equals != std::string::npos) {
+            value = key.substr(equals + 1);
+            key = key.substr(0, equals);
+        } else if (i + 1 < argc) {
+            value = argv[++i];
+        } else {
+            *error = "--" + key + " needs a value";
+            return false;
+        }
+        if (!apply_setting(key, value, settings, error)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace
 
-int main() {
+int main(int argc, char* argv[]) {
+    for (int i = 1; i < argc; ++i) {
+        const std::string arg = argv[i];
+        if (arg == "--help" || arg == "-h") {
+            print_usage(argv[0]);
+            return 0;
+        }
+    }
+
+    Settings settings;
+    std::string settings_error;
+    if (const char* code = std::getenv("INTERCLI_ROOM_CODE")) {
+        if (*code && !apply_setting("room-code", code, &settings, &settings_error)) {
+            std::cerr << "INTERCLI_ROOM_CODE: " << settings_error << std::endl;
+            return 2;
+        }
+    }
+    if (!parse_arguments(argc, argv, &settings, &settings_error)) {
+        std::cerr << settings_error << "\nTry --help" << std::endl;
+        return 2;
+    }
+
     std::signal(SIGINT, signal_handler);
     std::signal(SIGTERM, signal_handler);
 #ifdef _WIN32
@@ -163,6 +278,10 @@ int main() {
 
     try {
         SecureComm::ServerOptions options;
+        options.port = static_cast<uint16_t>(settings.port);
+        options.room_code = settings.room_code;
+        options.max_wrong_codes_per_address = settings.max_wrong_codes;
+        options.lockout = std::chrono::seconds(settings.lockout_seconds);
         options.identity_private = load_or_create_identity();
         options.log = [](const std::string& line, bool is_error) {
             (is_error ? std::cerr : std::cout) << line << std::endl;
@@ -181,6 +300,9 @@ int main() {
         std::cout << "- Server identity proven with an Ed25519 signature" << std::endl;
         std::cout << "- AES-256-GCM encryption, with altered or replayed messages rejected" << std::endl;
         std::cout << "- Automatic key rotation" << std::endl;
+        std::cout << (settings.room_code.empty() ? "Open chat: anyone who can reach this server can join"
+                                                 : "A room code is needed to join")
+                  << std::endl;
         std::cout << "Press Ctrl+C to stop" << std::endl;
 
         std::thread runner([&server] { server.run(); });
