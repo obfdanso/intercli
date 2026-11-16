@@ -411,6 +411,11 @@ struct SecureServer::Impl {
                     inet_ntop(AF_INET, a->sin6_addr.s6_addr + 12, addr_text, sizeof(addr_text));
                 } else if (IN6_IS_ADDR_LOOPBACK(&a->sin6_addr)) {
                     inet_ntop(AF_INET6, &a->sin6_addr, addr_text, sizeof(addr_text));
+                } else if (!options_.allow_global_ipv6 && !IN6_IS_ADDR_LINKLOCAL(&a->sin6_addr) &&
+                           (a->sin6_addr.s6_addr[0] & 0xfe) != 0xfc) {
+                    LogLine(this, false) << "Refused an IPv6 connection from outside the local network";
+                    close_socket(client_socket);
+                    continue;
                 } else {
                     // One machine can use any address in its /64 network, so the
                     // network is what gets counted and locked out: changing

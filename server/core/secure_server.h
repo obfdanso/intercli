@@ -28,6 +28,11 @@ struct ServerOptions {
     // default: another user account on the same PC is otherwise limited like
     // anyone else.
     bool exempt_loopback = false;
+    // IPv6 connections are taken from this PC and from the local network
+    // (link-local and unique-local addresses) only. An IPv6 address is often
+    // reachable from the whole internet, with no router in between hiding it
+    // the way home routers hide IPv4, so anything wider must be switched on.
+    bool allow_global_ipv6 = false;
     // The server's long-term identity (32-byte Ed25519 private key). Empty: a
     // temporary identity is made for this run.
     std::vector<uint8_t> identity_private;
