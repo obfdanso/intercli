@@ -168,6 +168,12 @@ std::shared_ptr<SecureComm::ChatClient> ChatController::makeClient() {
         post([this, n, joined, raw] { onPresence(qs(n), joined, qs(raw)); });
     };
     ev.on_notice = [this, post](const std::string& t) { post([this, t] { onNotice(qs(t)); }); };
+    ev.on_room_message = [this, post](const std::string& room, const std::string& f, const std::string& t) {
+        post([this, room, f, t] { onRoomMessage(qs(room), qs(f), qs(t)); });
+    };
+    ev.on_room_event = [this, post](const std::string& room, const std::string& n, bool joined) {
+        post([this, room, n, joined] { onRoomEvent(qs(room), qs(n), joined); });
+    };
     ev.on_server_error = [this, post](const std::string& t) {
         post([this, t] { onNotice(QStringLiteral("Server error: ") + qs(t)); });
     };
@@ -499,6 +505,17 @@ void ChatController::onRegistered(const QString& name) {
     setState(Online);
     if (client_) {
         client_->request_roster();
+        // Back into our rooms: the ones from before a reconnect, and the ones
+        // that came back with saved messages.
+        QStringList rooms = rooms_;
+        for (const QString& id : list_->roomIds()) {
+            if (!rooms.contains(id.mid(1))) {
+                rooms.append(id.mid(1));
+            }
+        }
+        for (const QString& room : rooms) {
+            client_->join_room(ss(room));
+        }
     }
     emit sessionChanged();
 }
@@ -549,7 +566,8 @@ MessageModel* ChatController::modelFor(const QString& id) {
     const QString key = id.isNull() ? QStringLiteral("") : id;
     auto it = models_.find(key);
     if (it == models_.end()) {
-        it = models_.insert(key, new MessageModel(key.isEmpty(), this));
+        // Rooms, like Everyone, show who said each message.
+        it = models_.insert(key, new MessageModel(key.isEmpty() || key.startsWith(QLatin1Char('#')), this));
     }
     return it.value();
 }
@@ -656,7 +674,7 @@ void ChatController::loadSavedHistory() {
         QString preview = c.lastText;
         if (c.lastKind == MessageModel::Outgoing) {
             preview = QStringLiteral("You: ") + c.lastText;
-        } else if (c.conversation.isEmpty()) {
+        } else if (c.conversation.isEmpty() || c.conversation.startsWith(QLatin1Char('#'))) {
             preview = c.lastSender + QStringLiteral(": ") + c.lastText;
         }
         list_->touch(c.conversation, preview, c.lastTime, false);
@@ -743,6 +761,78 @@ void ChatController::onNotice(const QString& text) {
     addRow(last_target_, MessageModel::System, QString(), text, false);
 }
 
+bool ChatController::joinRoom(const QString& name) {
+    QString room = name.trimmed();
+    if (room.startsWith(QLatin1Char('#'))) {
+        room.remove(0, 1);
+    }
+    if (state_ != Online || !client_ || !Intercli::isValidName(room)) {
+        return false;
+    }
+    if (rooms_.contains(room)) {
+        setCurrentConversation(QLatin1Char('#') + room);  // already in it: just open it
+        return true;
+    }
+    pending_room_ = room;
+    last_target_ = current_;  // a refusal is shown where the user is now
+    return client_->join_room(ss(room));
+}
+
+void ChatController::leaveRoom(const QString& name) {
+    QString room = name;
+    if (room.startsWith(QLatin1Char('#'))) {
+        room.remove(0, 1);
+    }
+    if (state_ == Online && client_ && rooms_.contains(room)) {
+        client_->leave_room(ss(room));  // the server's answer removes it from the list
+    } else {
+        forgetRoom(room);
+    }
+}
+
+void ChatController::forgetRoom(const QString& room) {
+    const QString id = QLatin1Char('#') + room;
+    rooms_.removeAll(room);
+    if (current_ == id) {
+        setCurrentConversation(QString());
+    }
+    list_->remove(id);
+    if (models_.contains(id)) {
+        models_.value(id)->clear();
+    }
+}
+
+void ChatController::onRoomMessage(const QString& room, const QString& from, const QString& text) {
+    const QString id = QLatin1Char('#') + room;
+    addRow(id, MessageModel::Incoming, from, text, true);
+    const bool unseen = id != current_ || !window_active_;
+    list_->touch(id, from + QStringLiteral(": ") + text, QDateTime::currentDateTime(), unseen);
+    emit messageArrived(id);
+}
+
+void ChatController::onRoomEvent(const QString& room, const QString& name, bool joined) {
+    const QString id = QLatin1Char('#') + room;
+    if (name != my_name_) {
+        addRow(id, MessageModel::System, QString(), name + (joined ? QStringLiteral(" joined") : QStringLiteral(" left")),
+               true);
+        return;
+    }
+    if (!joined) {
+        forgetRoom(room);
+        return;
+    }
+    if (!rooms_.contains(room)) {
+        rooms_.append(room);
+    }
+    list_->ensure(id);
+    if (pending_room_ == room) {
+        // The user asked for this one just now (not a rejoin after a reconnect).
+        pending_room_.clear();
+        addRow(id, MessageModel::System, QString(), QStringLiteral("You joined #") + room, false);
+        setCurrentConversation(id);
+    }
+}
+
 void ChatController::onSendKeyRotated() {
     addRow(current_, MessageModel::System, QString(), QStringLiteral("Your send key rotated"), false);
     emit sessionChanged();
@@ -791,7 +881,9 @@ bool ChatController::send(const QString& text) {
         return false;
     }
     const std::string body = ss(text);
-    const bool ok = current_.isEmpty() ? client_->send_broadcast(body) : client_->send_direct(ss(current_), body);
+    const bool ok = current_.isEmpty()                    ? client_->send_broadcast(body)
+                  : current_.startsWith(QLatin1Char('#')) ? client_->send_room(ss(current_.mid(1)), body)
+                                                          : client_->send_direct(ss(current_), body);
     if (!ok) {
         return false;
     }
@@ -840,6 +932,8 @@ void ChatController::signOut() {
     }
     current_ = QStringLiteral("");
     last_target_.clear();
+    rooms_.clear();
+    pending_room_.clear();
     history_loaded_ = false;
     disconnect_reason_.clear();
     needs_sign_in_ = false;

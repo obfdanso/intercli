@@ -133,6 +133,11 @@ public:
     Q_INVOKABLE void trustNewIdentity();
     // Sends to the current conversation. False when blank, too long or offline.
     Q_INVOKABLE bool send(const QString& text);
+    // Named rooms. A room shows in the sidebar as "#name"; either form is
+    // taken here. Joining a room nobody is in creates it. False when offline
+    // or the name can't be a room's.
+    Q_INVOKABLE bool joinRoom(const QString& name);
+    Q_INVOKABLE void leaveRoom(const QString& name);
     Q_INVOKABLE void rotateKey();
     Q_INVOKABLE void reconnect();
     Q_INVOKABLE void signOut();
@@ -200,6 +205,9 @@ private:
     void onRoster(const QStringList& names);
     void onPresence(const QString& name, bool joined, const QString& raw);
     void onNotice(const QString& text);
+    void onRoomMessage(const QString& room, const QString& from, const QString& text);
+    void onRoomEvent(const QString& room, const QString& name, bool joined);
+    void forgetRoom(const QString& room);
     void onSendKeyRotated();
     void onDisconnected(const QString& reason);
 
@@ -218,6 +226,8 @@ private:
     QHash<QString, MessageModel*> models_;
     QString current_;
     QString last_target_;
+    QStringList rooms_;     // rooms we are in, without the '#'; joined again after a reconnect
+    QString pending_room_;  // a room the user just asked to join: opened once the server agrees
     bool window_active_ = true;
     qint64 next_local_id_ = -1;
 

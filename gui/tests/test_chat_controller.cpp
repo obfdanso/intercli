@@ -143,6 +143,48 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(bare.state(), ChatController::Online, kWait);
     }
 
+    void rooms_join_message_and_leave() {
+        ChatController rita, ravi;
+        rita.signIn("127.0.0.1", SecureComm::DEFAULT_PORT, "rita");
+        ravi.signIn("127.0.0.1", SecureComm::DEFAULT_PORT, "ravi");
+        QTRY_COMPARE_WITH_TIMEOUT(rita.state(), ChatController::Online, kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(ravi.state(), ChatController::Online, kWait);
+
+        QVERIFY(!rita.joinRoom("two words"));
+        QVERIFY(rita.joinRoom("dev"));
+        QTRY_COMPARE_WITH_TIMEOUT(rita.currentConversation(), QStringLiteral("#dev"), kWait);
+        QVERIFY(ravi.joinRoom("#dev"));  // with or without the #
+        QTRY_COMPARE_WITH_TIMEOUT(ravi.currentConversation(), QStringLiteral("#dev"), kWait);
+
+        // A message reaches the other member, with its sender, and nobody else.
+        QVERIFY(rita.send("hello room"));
+        MessageModel* seen = ravi.messages();
+        QTRY_VERIFY_WITH_TIMEOUT(seen->count() > 0 && seen->entryAt(seen->count() - 1).text == QStringLiteral("hello room"),
+                                 kWait);
+        QCOMPARE(seen->entryAt(seen->count() - 1).sender, QStringLiteral("rita"));
+        bob->setCurrentConversation("#dev");
+        QCOMPARE(bob->messages()->count(), 0);
+        bob->setCurrentConversation(QString());
+
+        // The room is a row of its own, in the rooms section.
+        bool listed = false;
+        for (int r = 0; r < ravi.conversations()->rowCount(); ++r) {
+            const QModelIndex i = ravi.conversations()->index(r, 0);
+            if (i.data(ConversationListModel::ConversationIdRole).toString() == QStringLiteral("#dev")) {
+                listed = i.data(ConversationListModel::SectionRole).toString() == QStringLiteral("rooms");
+            }
+        }
+        QVERIFY(listed);
+
+        // Leaving takes it out of the list and goes back to Everyone.
+        ravi.leaveRoom("#dev");
+        QTRY_COMPARE_WITH_TIMEOUT(ravi.currentConversation(), QString(""), kWait);
+        for (int r = 0; r < ravi.conversations()->rowCount(); ++r) {
+            QVERIFY(ravi.conversations()->index(r, 0).data(ConversationListModel::ConversationIdRole).toString() !=
+                    QStringLiteral("#dev"));
+        }
+    }
+
     void taken_name_reports_name_error() {
         ChatController other;
         other.signIn("127.0.0.1", SecureComm::DEFAULT_PORT, "bob");
