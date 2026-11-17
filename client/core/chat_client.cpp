@@ -519,6 +519,19 @@ bool ChatClient::open_from(const std::vector<uint8_t>& key, const std::vector<ui
     }
 }
 
+std::chrono::system_clock::time_point sent_time_from_counter(uint64_t counter,
+                                                             std::chrono::system_clock::time_point now) {
+    using namespace std::chrono;
+    const auto now_us = duration_cast<microseconds>(now.time_since_epoch()).count();
+    const auto sent_us = static_cast<int64_t>((std::min)(counter, static_cast<uint64_t>(INT64_MAX)));
+    const auto age = microseconds(now_us - sent_us);
+    // Kept messages last a day; a week allows for a sender's clock being off.
+    if (age <= minutes(1) || age > hours(24 * 7)) {
+        return now;
+    }
+    return now - duration_cast<system_clock::duration>(age);
+}
+
 // The key shared with whoever holds pub. Nothing is remembered yet: that
 // waits until the key has proved itself (see record_key).
 bool ChatClient::peer_key_from(const std::string& name, const std::vector<uint8_t>& pub, PeerKey* out) {
@@ -1187,7 +1200,9 @@ void ChatClient::handle_chat(const ChatMessage& msg) {
                     break;
                 }
                 record_key(from, sender);
-                if (events_.on_direct) events_.on_direct(from, plain);
+                if (events_.on_direct) {
+                    events_.on_direct(from, plain, sent_time_from_counter(number, std::chrono::system_clock::now()));
+                }
             } else if (events_.on_notice) {
                 events_.on_notice("A private message from " + from + " could not be read");
             }

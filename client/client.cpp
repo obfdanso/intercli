@@ -4,6 +4,7 @@
 #include "../crypto/crypto_utils.h"
 #include <chrono>
 #include <cstdio>
+#include <ctime>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -19,6 +20,24 @@
 #endif
 
 namespace {
+
+// "14:05", or "Mon 14:05" for another day, in local time.
+std::string when(std::chrono::system_clock::time_point t) {
+    const std::time_t at = std::chrono::system_clock::to_time_t(t);
+    const std::time_t now = std::time(nullptr);
+    std::tm local{}, today{};
+#ifdef _WIN32
+    localtime_s(&local, &at);
+    localtime_s(&today, &now);
+#else
+    localtime_r(&at, &local);
+    localtime_r(&now, &today);
+#endif
+    const bool same_day = local.tm_yday == today.tm_yday && local.tm_year == today.tm_year;
+    char out[32];
+    std::strftime(out, sizeof(out), same_day ? "%H:%M" : "%a %H:%M", &local);
+    return out;
+}
 
 // Where this person's key for private messages lives: INTERCLI_KEY_FILE if
 // set, else a file in the user's own folder. Empty (nothing is saved) if
@@ -116,8 +135,11 @@ private:
             std::cout << reason << std::endl;
             answer_registration(false);
         };
-        ev.on_direct = [this](const std::string& from, const std::string& text) {
-            print_incoming("[" + from + " -> you] " + text);
+        ev.on_direct = [this](const std::string& from, const std::string& text,
+                              std::chrono::system_clock::time_point sent) {
+            // A message kept while we were away says when it was written.
+            const bool old = std::chrono::system_clock::now() - sent > std::chrono::minutes(1);
+            print_incoming("[" + from + " -> you] " + (old ? "(sent " + when(sent) + ") " : "") + text);
             client_.send_read(from);  // on screen is as read as a terminal gets
         };
         ev.on_receipt = [](const std::string& peer, const std::string& what) {

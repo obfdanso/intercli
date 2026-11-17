@@ -82,7 +82,9 @@ struct Recorder {
         ChatEvents ev;
         ev.on_registered = [this](const std::string& n) { add("registered:" + n); };
         ev.on_register_failed = [this](const std::string& r) { add("register_failed:" + r); };
-        ev.on_direct = [this](const std::string& f, const std::string& t) { add("direct:" + f + ":" + t); };
+        ev.on_direct = [this](const std::string& f, const std::string& t, std::chrono::system_clock::time_point) {
+            add("direct:" + f + ":" + t);
+        };
         ev.on_broadcast = [this](const std::string& f, const std::string& t) { add("broadcast:" + f + ":" + t); };
         ev.on_roster = [this](const std::vector<std::string>& names, const std::string&) {
             std::string joined;

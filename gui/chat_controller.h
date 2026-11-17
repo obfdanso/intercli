@@ -216,7 +216,8 @@ private:
                    const QString& hostError = QString());
     MessageModel* modelFor(const QString& id);
     void addRow(const QString& conversation, MessageModel::Kind kind, const QString& sender,
-                const QString& text, bool persist, const QString& file = QString());
+                const QString& text, bool persist, const QString& file = QString(),
+                const QDateTime& time = QDateTime());
     void onFile(const QString& from, SecureComm::FileTarget target, const QString& room, const QString& name,
                 const QByteArray& data);
     void loadSavedHistory();
@@ -226,7 +227,7 @@ private:
     void onConnectResult(bool ok, const QString& error);
     void onRegistered(const QString& name);
     void onRegisterFailed(const QString& reason);
-    void onDirect(const QString& from, const QString& text);
+    void onDirect(const QString& from, const QString& text, const QDateTime& sent);
     void onBroadcast(const QString& from, const QString& text);
     void onRoster(const QStringList& names);
     void onPresence(const QString& name, bool joined, const QString& raw);

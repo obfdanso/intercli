@@ -337,7 +337,9 @@ static ChatEvents listen(Ears& ears) {
         ears.add(std::string("file:") + from + ":" + kind + ":" + room + ":" + name + ":" +
                  std::to_string(data.size()) + ":" + std::to_string(sum));
     };
-    ev.on_direct = [&ears](const std::string& from, const std::string& t) { ears.add("direct:" + from + ":" + t); };
+    ev.on_direct = [&ears](const std::string& from, const std::string& t, std::chrono::system_clock::time_point) {
+        ears.add("direct:" + from + ":" + t);
+    };
     ev.on_receipt = [&ears](const std::string& peer, const std::string& what) {
         ears.add("receipt:" + peer + ":" + what);
     };
@@ -693,6 +695,23 @@ static void end_to_end_tests() {
     check(!zed_ears.heard("direct:ann:first"), "the held message was never sent");
 }
 
+// A kept message shows when it was written, from the sender's sealed number.
+static void sent_time_tests() {
+    using namespace std::chrono;
+    const system_clock::time_point now = system_clock::now();
+    const auto micros = [](system_clock::time_point t) {
+        return static_cast<uint64_t>(duration_cast<microseconds>(t.time_since_epoch()).count());
+    };
+    const system_clock::time_point hour_ago = now - hours(1);
+    check(duration_cast<seconds>(sent_time_from_counter(micros(hour_ago), now) - hour_ago).count() == 0,
+          "a message from an hour ago shows that time");
+    check(sent_time_from_counter(micros(now - seconds(5)), now) == now,
+          "a message from seconds ago shows when it arrived");
+    check(sent_time_from_counter(micros(now + hours(2)), now) == now, "a time in the future is not believed");
+    check(sent_time_from_counter(42, now) == now, "nor is one from long before such messages existed");
+    check(sent_time_from_counter(micros(now - hours(30 * 24)), now) == now, "nor one older than a kept message can be");
+}
+
 // Someone who connects but never picks a name is let go after a while.
 static void name_timeout_tests() {
     ServerOptions options;
@@ -781,6 +800,9 @@ int main() {
     std::cout << "Away messages and receipts" << std::endl;
     receipt_tests();
     end_to_end_tests();
+
+    std::cout << "Time a message was sent" << std::endl;
+    sent_time_tests();
 
     std::cout << "Time to pick a name" << std::endl;
     name_timeout_tests();

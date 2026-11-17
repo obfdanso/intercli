@@ -163,8 +163,9 @@ std::shared_ptr<SecureComm::ChatClient> ChatController::makeClient() {
     SecureComm::ChatEvents ev;
     ev.on_registered = [this, post](const std::string& n) { post([this, n] { onRegistered(qs(n)); }); };
     ev.on_register_failed = [this, post](const std::string& r) { post([this, r] { onRegisterFailed(qs(r)); }); };
-    ev.on_direct = [this, post](const std::string& f, const std::string& t) {
-        post([this, f, t] { onDirect(qs(f), qs(t)); });
+    ev.on_direct = [this, post](const std::string& f, const std::string& t, std::chrono::system_clock::time_point sent) {
+        const qint64 ms = std::chrono::duration_cast<std::chrono::milliseconds>(sent.time_since_epoch()).count();
+        post([this, f, t, ms] { onDirect(qs(f), qs(t), QDateTime::fromMSecsSinceEpoch(ms)); });
     };
     ev.on_broadcast = [this, post](const std::string& f, const std::string& t) {
         post([this, f, t] { onBroadcast(qs(f), qs(t)); });
@@ -750,13 +751,13 @@ void ChatController::loadOlder() {
 }
 
 void ChatController::addRow(const QString& conversation, MessageModel::Kind kind, const QString& sender,
-                            const QString& text, bool persist, const QString& file) {
+                            const QString& text, bool persist, const QString& file, const QDateTime& time) {
     ChatEntry e;
     e.file = file;
     e.kind = kind;
     e.sender = sender;
     e.text = text;
-    e.time = QDateTime::currentDateTime();
+    e.time = time.isValid() ? time : QDateTime::currentDateTime();
     e.id = 0;
     if (persist && saving()) {
         StoredMessage m;
@@ -806,15 +807,16 @@ void ChatController::onReceipt(const QString& peer, const QString& what) {
     }
 }
 
-void ChatController::onDirect(const QString& from, const QString& text) {
-    addRow(from, MessageModel::Incoming, from, text, true);
+void ChatController::onDirect(const QString& from, const QString& text, const QDateTime& sent) {
+    // A message kept while we were away shows when it was written.
+    addRow(from, MessageModel::Incoming, from, text, true, QString(), sent);
     setReceipt(from, QString());  // the latest message here is no longer ours
     owes_read_.insert(from);
     if (from == current_ && window_active_) {
         markSeen(from);
     }
     const bool unseen = from != current_ || !window_active_;
-    list_->touch(from, text, QDateTime::currentDateTime(), unseen);
+    list_->touch(from, text, sent, unseen);
     emit messageArrived(from);
 }
 

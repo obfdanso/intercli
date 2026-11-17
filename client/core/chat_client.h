@@ -30,10 +30,19 @@ enum class FileTarget { Direct, Everyone, Room };
 // Every callback runs on the client's receive thread, except on_send_key_rotated,
 // which runs on whichever thread sent the message that triggered the rotation.
 // A callback may call disconnect(), but must not destroy the ChatClient.
+// When a direct message was written, from the number sealed into it (the
+// sender's clock in microseconds). Only believed for a message well over a
+// minute old, as one kept while we were away is; anything else, or a time
+// that makes no sense, gives now, so clocks a little apart don't matter.
+std::chrono::system_clock::time_point sent_time_from_counter(uint64_t counter,
+                                                             std::chrono::system_clock::time_point now);
+
 struct ChatEvents {
     std::function<void(const std::string& name)> on_registered;
     std::function<void(const std::string& reason)> on_register_failed;
-    std::function<void(const std::string& from, const std::string& text)> on_direct;
+    // sent: when it was written (see sent_time_from_counter).
+    std::function<void(const std::string& from, const std::string& text,
+                       std::chrono::system_clock::time_point sent)> on_direct;
     std::function<void(const std::string& from, const std::string& text)> on_broadcast;
     std::function<void(const std::vector<std::string>& names, const std::string& raw)> on_roster;
     std::function<void(const std::string& name, bool joined, const std::string& raw)> on_presence;
