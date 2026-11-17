@@ -56,6 +56,7 @@ endif()
 add_library(intercli_client_core STATIC
     client/core/chat_client.cpp
     client/core/key_store.cpp
+    client/core/downloads.cpp
 )
 
 target_include_directories(intercli_client_core PUBLIC include client/core)
@@ -160,6 +161,12 @@ add_executable(test_key_store
 target_include_directories(test_key_store PRIVATE crypto)
 target_link_libraries(test_key_store intercli_client_core)
 add_test(NAME key_store COMMAND test_key_store)
+
+add_executable(test_downloads
+    tests/test_downloads.cpp
+)
+target_link_libraries(test_downloads intercli_client_core)
+add_test(NAME downloads COMMAND test_downloads)
 
 add_executable(test_chat_client
     tests/test_chat_client.cpp

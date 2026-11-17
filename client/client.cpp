@@ -1,6 +1,7 @@
 // Terminal chat client: a console front end over SecureComm::ChatClient.
 
 #include "chat_client.h"
+#include "downloads.h"
 #include "../crypto/crypto_utils.h"
 #include <chrono>
 #include <cstdio>
@@ -167,26 +168,11 @@ private:
         };
         ev.on_file = [](const std::string& from, SecureComm::FileTarget, const std::string& room,
                         const std::string& name, const std::vector<uint8_t>& data) {
-            // The name is the sender's choice, so it is cleaned first; and the
-            // file is created only if nothing by that name exists ("x"), so a
-            // received file can never replace one that is already there.
-            const std::string safe = SecureComm::safe_file_name(name);
-            std::error_code ec;
-            const std::filesystem::path dir = "intercli-downloads";
-            std::filesystem::create_directories(dir, ec);
-            std::filesystem::path target = dir / safe;
-            std::FILE* file = std::fopen(target.string().c_str(), "wbx");
-            for (int n = 1; !file && n < 1000; ++n) {
-                target = dir / (std::to_string(n) + "-" + safe);
-                file = std::fopen(target.string().c_str(), "wbx");
-            }
-            bool out = false;
-            if (file) {
-                out = std::fwrite(data.data(), 1, data.size(), file) == data.size();
-                out = std::fclose(file) == 0 && out;
-            }
+            // Never over an existing file, and marked as downloaded on Windows.
+            const std::filesystem::path target = SecureComm::save_download("intercli-downloads", name, data);
             const std::string where = room.empty() ? "" : " in #" + room;
-            print_incoming(out ? "*** " + from + " sent a file" + where + ": saved as " + target.string() + " ***"
+            print_incoming(!target.empty()
+                               ? "*** " + from + " sent a file" + where + ": saved as " + target.u8string() + " ***"
                                : "*** " + from + " sent a file" + where + ", but it could not be saved ***");
         };
         ev.on_room_list = [](const std::vector<std::string>& rooms) {
