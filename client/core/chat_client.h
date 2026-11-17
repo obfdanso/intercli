@@ -171,7 +171,7 @@ private:
     std::string chat_scope() const;
     bool peer_key_from(const std::string& name, const std::vector<uint8_t>& pub, PeerKey* out);
     bool record_key(const std::string& name, const PeerKey& key);
-    bool held_back(const std::string& name);
+    void warn_held_back(const std::string& name);
     bool ask_key(const std::string& name);
     bool wait_for_key(const std::string& name, PeerKey* out);
     void handle_key(const std::string& name, const std::string& key);
