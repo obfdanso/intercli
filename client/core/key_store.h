@@ -46,10 +46,13 @@ private:
     void load();
     void save_locked();
     void save_soon_locked();
+    std::string identity_line_locked();
 
     std::string path_;
     bool key_in_file_ = true;
     bool identity_was_plain_ = false;  // read from an unwrapped "identity" line
+    std::string stored_identity_;      // the key's line as the file had it
+    std::string wrapped_identity_;     // the key's line, wrapped for this Windows user
     mutable std::mutex mutex_;
     std::vector<uint8_t> private_;
     std::vector<uint8_t> public_;

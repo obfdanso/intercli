@@ -139,6 +139,11 @@ void KeyStore::load() {
                 }
 #endif
             }
+            // Written back as it was if it can't be wrapped again (see save_locked).
+            stored_identity_ = kind + ' ' + a;
+            if (kind == "identity-protected" && key.size() == 32) {
+                wrapped_identity_ = stored_identity_;
+            }
             try {
                 if (key.size() == 32) {
                     public_ = x25519_public_from_private(key);
@@ -150,7 +155,7 @@ void KeyStore::load() {
             counter_ = number_from(a) + kCounterSkip;
         } else if (kind == "floor") {
             floor_ = number_from(a);
-        } else if (kind == "mark"&& a.size() == 64 && plain_word(a) && marks_.size() < kMaxPeers) {
+        } else if (kind == "mark" && a.size() == 64 && plain_word(a) && marks_.size() < kMaxPeers) {
             marks_[a] = number_from(b);
         } else if (kind == "peer" && plain_word(a) && plain_word(b) && peers_.size() < kMaxPeers) {
             const std::vector<uint8_t> key = key_from_hex(c);
@@ -181,6 +186,9 @@ void KeyStore::save_locked() {
     }
     std::filesystem::path temp = target;
     temp += ".tmp";
+    // The rest is written even when the key line can't be: the message
+    // numbers must survive a restart, or old messages could pass again.
+    bool retry = false;
     {
         std::ofstream out(temp, std::ios::trunc);
         if (!out) {
@@ -191,16 +199,12 @@ void KeyStore::save_locked() {
         std::filesystem::permissions(temp, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
                                      ignored);
         if (key_in_file_) {
-#ifdef _WIN32
-            const std::vector<uint8_t> wrapped = protect(private_);
-            if (wrapped.empty()) {
-                return;  // never written plainly instead; the old file stays
+            const std::string identity = identity_line_locked();
+            if (identity.empty()) {
+                retry = true;  // left out for now, never written plainly instead
+            } else {
+                out << identity << '\n';
             }
-            out << "identity-protected " << bytes_to_hex(wrapped) << '\n';
-#else
-            // Elsewhere the file itself is readable by this user only.
-            out << "identity " << bytes_to_hex(private_) << '\n';
-#endif
         }
         out << "counter " << counter_ << '\n';
         out << "floor " << floor_ << '\n';
@@ -211,10 +215,31 @@ void KeyStore::save_locked() {
             out << "mark " << mark.first << ' ' << mark.second << '\n';
         }
         if (!out.flush()) {
+            unsaved_ = true;
             return;
         }
     }
     std::filesystem::rename(temp, target, ignored);
+    unsaved_ = retry;
+}
+
+// The line that keeps our private key. On Windows it is wrapped for this
+// Windows user, once, and reused; if wrapping fails, the line the file had
+// before is kept as it was (never a newly written plain copy), and if there
+// is none, it is left out and tried again on the next save. Elsewhere the file
+// itself is readable by this user only.
+std::string KeyStore::identity_line_locked() {
+#ifdef _WIN32
+    if (wrapped_identity_.empty()) {
+        const std::vector<uint8_t> wrapped = protect(private_);
+        if (!wrapped.empty()) {
+            wrapped_identity_ = "identity-protected " + bytes_to_hex(wrapped);
+        }
+    }
+    return !wrapped_identity_.empty() ? wrapped_identity_ : stored_identity_;
+#else
+    return "identity " + bytes_to_hex(private_);
+#endif
 }
 
 void KeyStore::save_soon_locked() {
