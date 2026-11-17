@@ -49,6 +49,7 @@ private:
 
     std::string path_;
     bool key_in_file_ = true;
+    bool identity_was_plain_ = false;  // read from an unwrapped "identity" line
     mutable std::mutex mutex_;
     std::vector<uint8_t> private_;
     std::vector<uint8_t> public_;

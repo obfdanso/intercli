@@ -6,9 +6,41 @@
 #include <fstream>
 #include <sstream>
 
+#ifdef _WIN32
+#include <windows.h>
+#include <dpapi.h>
+#endif
+
 namespace SecureComm {
 
 namespace {
+
+#ifdef _WIN32
+// The private key is wrapped with DPAPI, so it only unwraps for the same
+// Windows user, as the desktop app keeps its own. Empty on failure.
+std::vector<uint8_t> protect(const std::vector<uint8_t>& plain) {
+    DATA_BLOB in = {static_cast<DWORD>(plain.size()), const_cast<BYTE*>(plain.data())};
+    DATA_BLOB out = {};
+    if (!CryptProtectData(&in, L"intercli key", nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &out)) {
+        return {};
+    }
+    std::vector<uint8_t> result(out.pbData, out.pbData + out.cbData);
+    LocalFree(out.pbData);
+    return result;
+}
+
+std::vector<uint8_t> unprotect(const std::vector<uint8_t>& wrapped) {
+    DATA_BLOB in = {static_cast<DWORD>(wrapped.size()), const_cast<BYTE*>(wrapped.data())};
+    DATA_BLOB out = {};
+    if (!CryptUnprotectData(&in, nullptr, nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &out)) {
+        return {};
+    }
+    std::vector<uint8_t> result(out.pbData, out.pbData + out.cbData);
+    SecureZeroMemory(out.pbData, out.cbData);
+    LocalFree(out.pbData);
+    return result;
+}
+#endif
 
 // People remembered at most; past this, new ones are not written down.
 constexpr size_t kMaxPeers = 5000;
@@ -57,6 +89,12 @@ KeyStore::KeyStore(const std::string& path) : path_(path) {
         public_ = x25519_public_from_private(private_);
         std::lock_guard<std::mutex> lock(mutex_);
         save_locked();
+    } else if (identity_was_plain_) {
+#ifdef _WIN32
+        // Written by an older version: wrapped from now on.
+        std::lock_guard<std::mutex> lock(mutex_);
+        save_locked();
+#endif
     }
 }
 
@@ -88,10 +126,21 @@ void KeyStore::load() {
         std::istringstream words(line);
         std::string kind, a, b, c;
         words >> kind >> a >> b >> c;
-        if (kind == "identity" && key_in_file_) {
-            const std::vector<uint8_t> key = key_from_hex(a);
+        if ((kind == "identity" || kind == "identity-protected") && key_in_file_) {
+            std::vector<uint8_t> key;
+            if (kind == "identity") {
+                key = key_from_hex(a);
+                identity_was_plain_ = true;
+            } else {
+#ifdef _WIN32
+                try {
+                    key = unprotect(hex_to_bytes(a.size() <= 4096 ? a : std::string()));
+                } catch (const std::exception&) {
+                }
+#endif
+            }
             try {
-                if (!key.empty()) {
+                if (key.size() == 32) {
                     public_ = x25519_public_from_private(key);
                     private_ = key;
                 }
@@ -142,7 +191,16 @@ void KeyStore::save_locked() {
         std::filesystem::permissions(temp, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
                                      ignored);
         if (key_in_file_) {
+#ifdef _WIN32
+            const std::vector<uint8_t> wrapped = protect(private_);
+            if (wrapped.empty()) {
+                return;  // never written plainly instead; the old file stays
+            }
+            out << "identity-protected " << bytes_to_hex(wrapped) << '\n';
+#else
+            // Elsewhere the file itself is readable by this user only.
             out << "identity " << bytes_to_hex(private_) << '\n';
+#endif
         }
         out << "counter " << counter_ << '\n';
         out << "floor " << floor_ << '\n';

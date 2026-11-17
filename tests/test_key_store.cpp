@@ -99,6 +99,34 @@ int main() {
             KeyStore store(path);
             check(!store.newer(std::vector<uint8_t>(32, 0x01), 1500), "the floor is remembered after a restart");
         }
+#ifdef _WIN32
+        {
+            // On Windows the private key is wrapped for this Windows user, and
+            // a key written plainly by an older version is wrapped on first use.
+            const auto contents = [&] {
+                std::ifstream in(path);
+                return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            };
+            std::remove(path.c_str());
+            std::vector<uint8_t> pub;
+            std::string secret;
+            {
+                KeyStore store(path);
+                pub = store.public_key();
+                secret = bytes_to_hex(store.private_key());
+            }
+            check(contents().find(secret) == std::string::npos && contents().find("identity-protected") != std::string::npos,
+                  "the private key is not in the file as it is");
+            check(KeyStore(path).public_key() == pub, "and the same key comes back next time");
+
+            {
+                std::ofstream plain(path, std::ios::trunc);
+                plain << "identity " << secret << "\n";
+            }
+            check(KeyStore(path).public_key() == pub, "a plainly written key is still read");
+            check(contents().find(secret) == std::string::npos, "and is wrapped from then on");
+        }
+#endif
         KeyStore a, b;
         check(a.public_key() != b.public_key(), "without a file every store has its own key");
     } catch (const std::exception& e) {

@@ -67,7 +67,7 @@ target_link_libraries(intercli_client_core PUBLIC
     Threads::Threads
 )
 if(WIN32)
-    target_link_libraries(intercli_client_core PUBLIC ws2_32)
+    target_link_libraries(intercli_client_core PUBLIC ws2_32 crypt32)
 endif()
 
 # Add client executable
