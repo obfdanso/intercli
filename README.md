@@ -356,6 +356,20 @@ be in 16.
 
 Names (of people and rooms) can no longer start with `#`.
 
+### Files and pictures
+
+Files of up to 8 MB can be sent to a person, a room or everyone. They travel in pieces
+inside the same encrypted channel as messages, so the host relays them like any message.
+
+- **Desktop app:** drag a file onto the conversation. Received files are saved to
+  `Downloads/intercli` (never over an existing file) and shown in the conversation;
+  pictures are previewed, and clicking a file opens it.
+- **Terminal client:** `/send @name path`, `/send #room path` or `/send all path`.
+  Received files are saved to an `intercli-downloads` folder where the client was started.
+
+A received file is only ever saved, never run. Treat files from people you don't know as
+you would an email attachment.
+
 ### Host controls (desktop app)
 
 With someone's conversation open, the host's details panel can:
