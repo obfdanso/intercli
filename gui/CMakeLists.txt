@@ -135,3 +135,15 @@ if(WIN32)
             COMMAND ${CMAKE_COMMAND} -E copy_if_different ${OPENSSL_RUNTIME_DLLS} $<TARGET_FILE_DIR:intercli_gui>)
     endif()
 endif()
+
+# The app and everything Qt it needs, for an installed copy or a package.
+install(TARGETS intercli_gui RUNTIME DESTINATION ${INTERCLI_BIN_DIR})
+if(WIN32)
+    install(CODE "
+        execute_process(
+            COMMAND \"${WINDEPLOYQT_EXECUTABLE}\" --release
+                    --no-translations --no-system-d3d-compiler --no-opengl-sw
+                    --qmldir \"${CMAKE_CURRENT_SOURCE_DIR}/qml\"
+                    \"\${CMAKE_INSTALL_PREFIX}/intercli.exe\"
+            COMMAND_ERROR_IS_FATAL ANY)")
+endif()
