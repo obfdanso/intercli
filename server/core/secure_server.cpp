@@ -319,8 +319,11 @@ struct SecureServer::Impl {
 
     explicit Impl(ServerOptions options)
         : options_(std::move(options)), server_socket_(-1), running_(false) {
-        banned_names_.insert(options_.banned_names.begin(), options_.banned_names.end());
-        banned_addresses_.insert(options_.banned_addresses.begin(), options_.banned_addresses.end());
+        for (const ServerOptions::Ban& ban : options_.bans) {
+            if (!ban.name.empty()) {
+                bans_[ban.name] = ban.address;
+            }
+        }
 #ifdef _WIN32
         // Initialize Winsock
         WSADATA wsaData;
@@ -741,8 +744,7 @@ struct SecureServer::Impl {
     }
 
     // Names and addresses the host has banned; guarded by admin_mutex_.
-    std::set<std::string> banned_names_;
-    std::set<std::string> banned_addresses_;
+    std::map<std::string, std::string> bans_;  // name -> the address banned with it, or empty
     std::mutex admin_mutex_;
 
     bool ban(const std::string& name) {
@@ -757,10 +759,7 @@ struct SecureServer::Impl {
         const bool ban_address = conn->peer.rfind("127.", 0) != 0 && conn->peer != "::1";
         {
             std::lock_guard<std::mutex> lock(admin_mutex_);
-            banned_names_.insert(name);
-            if (ban_address) {
-                banned_addresses_.insert(conn->peer);
-            }
+            bans_[name] = ban_address ? conn->peer : std::string();
         }
         if (ban_address) {
             // Everything else that machine has open goes too, or it would stay
@@ -794,26 +793,38 @@ struct SecureServer::Impl {
         return remove_person(name, reason);
     }
 
-    SecureServer::Bans bans() {
+    std::vector<ServerOptions::Ban> bans() {
         std::lock_guard<std::mutex> lock(admin_mutex_);
-        return {std::vector<std::string>(banned_names_.begin(), banned_names_.end()),
-                std::vector<std::string>(banned_addresses_.begin(), banned_addresses_.end())};
+        std::vector<ServerOptions::Ban> out;
+        for (const auto& ban : bans_) {
+            out.push_back({ban.first, ban.second});
+        }
+        return out;
+    }
+
+    bool unban(const std::string& name) {
+        std::lock_guard<std::mutex> lock(admin_mutex_);
+        return bans_.erase(name) > 0;
     }
 
     void clear_bans() {
         std::lock_guard<std::mutex> lock(admin_mutex_);
-        banned_names_.clear();
-        banned_addresses_.clear();
+        bans_.clear();
     }
 
     bool banned_name(const std::string& name) {
         std::lock_guard<std::mutex> lock(admin_mutex_);
-        return banned_names_.count(name) > 0;
+        return bans_.count(name) > 0;
     }
 
     bool banned_address(const std::string& address) {
         std::lock_guard<std::mutex> lock(admin_mutex_);
-        return banned_addresses_.count(address) > 0;
+        for (const auto& ban : bans_) {
+            if (!ban.second.empty() && ban.second == address) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // Everything that ends a connection: it leaves its rooms, its name is freed
@@ -1817,8 +1828,12 @@ bool SecureServer::ban(const std::string& name) {
     return impl_->ban(name);
 }
 
-SecureServer::Bans SecureServer::bans() const {
+std::vector<ServerOptions::Ban> SecureServer::bans() const {
     return impl_->bans();
+}
+
+bool SecureServer::unban(const std::string& name) {
+    return impl_->unban(name);
 }
 
 void SecureServer::clear_bans() {
