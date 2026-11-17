@@ -225,9 +225,37 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(downloads.path() + "/notes (1).bin"), kWait);
     }
 
+    void private_messages_have_a_safety_code() {
+        ChatController ivy, jack;
+        ivy.signIn("127.0.0.1", SecureComm::DEFAULT_PORT, "ivy");
+        jack.signIn("127.0.0.1", SecureComm::DEFAULT_PORT, "jack");
+        QTRY_COMPARE_WITH_TIMEOUT(ivy.state(), ChatController::Online, kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(jack.state(), ChatController::Online, kWait);
+
+        // Everyone and rooms are not sealed, so there is nothing to compare.
+        QVERIFY(ivy.peerSafetyCode().isEmpty());
+        QCOMPARE(ivy.textLimit(), 1024);
+
+        // Opening the conversation is enough: the key is fetched right away.
+        ivy.setCurrentConversation("jack");
+        QCOMPARE(ivy.textLimit(), static_cast<int>(SecureComm::MAX_DIRECT_TEXT));
+        QTRY_COMPARE_WITH_TIMEOUT(ivy.peerSafetyCode().size(), 71, kWait);
+        jack.setCurrentConversation("ivy");
+        QTRY_COMPARE_WITH_TIMEOUT(jack.peerSafetyCode(), ivy.peerSafetyCode(), kWait);
+
+        QVERIFY(ivy.send("just us"));
+        MessageModel* shown = jack.messages();
+        QTRY_VERIFY_WITH_TIMEOUT(shown->count() > 0 &&
+                                 shown->entryAt(shown->count() - 1).text == QStringLiteral("just us"), kWait);
+        QVERIFY(!ivy.send(QString(static_cast<int>(SecureComm::MAX_DIRECT_TEXT) + 1, QLatin1Char('x'))));
+    }
+
     void receipts_and_away_messages() {
         ChatController gina;
         auto hugo = std::make_unique<ChatController>();
+        // Hugo keeps his key between sign-ins, as the app does.
+        const auto hugo_keys = std::make_shared<SecureComm::KeyStore>();
+        hugo->setKeyStore(hugo_keys);
         gina.signIn("127.0.0.1", SecureComm::DEFAULT_PORT, "gina");
         hugo->signIn("127.0.0.1", SecureComm::DEFAULT_PORT, "hugo");
         QTRY_COMPARE_WITH_TIMEOUT(gina.state(), ChatController::Online, kWait);
@@ -254,6 +282,7 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(gina.receipt().contains("away"), kWait);
 
         ChatController again;
+        again.setKeyStore(hugo_keys);
         again.signIn("127.0.0.1", SecureComm::DEFAULT_PORT, "hugo");
         QTRY_COMPARE_WITH_TIMEOUT(again.state(), ChatController::Online, kWait);
         again.setCurrentConversation("gina");
