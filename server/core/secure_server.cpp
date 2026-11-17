@@ -25,6 +25,8 @@
     #include <netinet/in.h>
     #include <arpa/inet.h>
     #include <unistd.h>
+    #include <fcntl.h>
+    #include <cerrno>
 #endif
 
 namespace SecureComm {
@@ -99,6 +101,34 @@ constexpr int kSendFlags = 0;
 // and then says nothing cannot hold a thread for ever.
 constexpr std::chrono::seconds kHandshakeTimeout(10);
 
+// One thread serves every connection, so nothing in it may wait on one client.
+// Output a client is slow to take is queued; these bound the queues:
+// stop reading new input while this much output is waiting in total,
+constexpr size_t kPauseReadingAbove = 4 * 1024 * 1024;
+// never queue more than this for one client,
+constexpr size_t kMaxQueuedOutput = 16 * 1024 * 1024;
+// and give up on a client that has taken nothing for this long.
+constexpr std::chrono::seconds kOutputStall(5);
+constexpr int kLoopTickMs = 50;
+
+static void set_nonblocking(intptr_t s) {
+#ifdef _WIN32
+    u_long on = 1;
+    ioctlsocket(static_cast<SOCKET>(s), FIONBIO, &on);
+#else
+    fcntl(static_cast<int>(s), F_SETFL, fcntl(static_cast<int>(s), F_GETFL, 0) | O_NONBLOCK);
+#endif
+}
+
+// Whether the last send or recv failed only because it would have had to wait.
+static bool would_block() {
+#ifdef _WIN32
+    return WSAGetLastError() == WSAEWOULDBLOCK;
+#else
+    return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR;
+#endif
+}
+
 static int wait_readable(intptr_t s, int timeout_ms) {
     pollfd p{};
     p.events = POLLIN;
@@ -127,7 +157,19 @@ struct ClientConnection {
                                        // address, or the /64 network for IPv6
     std::string       peer;            // the client's exact IP address, for bans
     bool              counted_joined = false;  // released from the pending count
-    std::atomic<bool> alive{true};
+    std::atomic<bool> alive{true};         // false: the loop closes it on its next pass
+
+    // The event loop's own state; touched only by the loop thread, except out
+    // and out_progress, which send_mutex guards.
+    enum class Stage { Hello, Confirm, Chat };
+    Stage             stage = Stage::Hello;
+    SessionInfo       session;
+    uint32_t          client_id = 0;
+    std::vector<uint8_t> in;               // bytes received, not yet a whole frame
+    std::vector<uint8_t> out;              // frames waiting for the socket to take them
+    std::chrono::steady_clock::time_point out_progress{};  // when out last shrank
+    std::chrono::steady_clock::time_point deadline{};      // the handshake must be done by then
+    std::chrono::steady_clock::time_point paused_until{};  // input is not looked at before then
 };
 
 // using namespace SecureComm; // Removed to avoid namespace conflicts
@@ -144,6 +186,7 @@ struct SecureServer::Impl {
     std::set<std::shared_ptr<ClientConnection>> connections_;
     std::mutex connections_mutex_;
     std::condition_variable connections_cv_;
+    bool loop_active_ = false;  // run() is serving; guarded by connections_mutex_
     std::map<std::string, std::shared_ptr<ClientConnection>> registry_;
     std::mutex registry_mutex_;
 
@@ -407,99 +450,273 @@ struct SecureServer::Impl {
         return true;
     }
 
-    void run() {
-        while (running_) {
-            if (wait_readable(server_socket_, 500) <= 0) {
-                continue;
+    // Takes one waiting connection, if it may come in, and sets it up for the loop.
+    void accept_one() {
+        struct sockaddr_storage client_addr {};
+        socklen_t client_len = sizeof(client_addr);
+
+        intptr_t client_socket = static_cast<intptr_t>(accept(static_cast<socket_t>(server_socket_), (struct sockaddr*)&client_addr, &client_len));
+        if (client_socket < 0) {
+            if (running_) {
+                LogLine(this, true) << "Failed to accept client connection";
+                // Out of descriptors, say: don't spin on the same failure.
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
             }
-
-            struct sockaddr_storage client_addr {};
-            socklen_t client_len = sizeof(client_addr);
-
-            intptr_t client_socket = static_cast<intptr_t>(accept(static_cast<socket_t>(server_socket_), (struct sockaddr*)&client_addr, &client_len));
-            if (client_socket < 0) {
-                if (running_) {
-                    LogLine(this, true) << "Failed to accept client connection";
-                    // Out of descriptors, say: don't spin on the same failure.
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                }
-                continue;
-            }
-
-            // An IPv4 client on the shared socket arrives as ::ffff:a.b.c.d; it
-            // is named a.b.c.d, so one machine is one address for the lockouts.
-            char addr_text[INET6_ADDRSTRLEN + 4] = "?";
-            char exact_text[INET6_ADDRSTRLEN] = "";  // set only where it differs
-            uint16_t client_port = 0;
-            if (client_addr.ss_family == AF_INET6) {
-                const auto* a = reinterpret_cast<const struct sockaddr_in6*>(&client_addr);
-                client_port = ntohs(a->sin6_port);
-                if (IN6_IS_ADDR_V4MAPPED(&a->sin6_addr)) {
-                    inet_ntop(AF_INET, a->sin6_addr.s6_addr + 12, addr_text, sizeof(addr_text));
-                } else if (IN6_IS_ADDR_LOOPBACK(&a->sin6_addr)) {
-                    inet_ntop(AF_INET6, &a->sin6_addr, addr_text, sizeof(addr_text));
-                } else if (!options_.allow_global_ipv6 && !IN6_IS_ADDR_LINKLOCAL(&a->sin6_addr) &&
-                           (a->sin6_addr.s6_addr[0] & 0xfe) != 0xfc) {
-                    LogLine(this, false) << "Refused an IPv6 connection from outside the local network";
-                    close_socket(client_socket);
-                    continue;
-                } else {
-                    // One machine can use any address in its /64 network, so the
-                    // network is what gets counted and locked out: changing
-                    // address must not buy more room code guesses.
-                    inet_ntop(AF_INET6, &a->sin6_addr, exact_text, sizeof(exact_text));
-                    struct in6_addr network = a->sin6_addr;
-                    std::memset(network.s6_addr + 8, 0, 8);
-                    inet_ntop(AF_INET6, &network, addr_text, sizeof(addr_text));
-                    std::strncat(addr_text, "/64", sizeof(addr_text) - std::strlen(addr_text) - 1);
-                }
-            } else {
-                const auto* a = reinterpret_cast<const struct sockaddr_in*>(&client_addr);
-                client_port = ntohs(a->sin_port);
-                inet_ntop(AF_INET, &a->sin_addr, addr_text, sizeof(addr_text));
-            }
-            LogLine(this, false) << "New client connected from " << addr_text << " port " << client_port;
-
-            if (!admit_pending(addr_text)) {
-                // Too many connections from one address that haven't joined.
-                close_socket(client_socket);
-                continue;
-            }
-
-            auto conn = std::make_shared<ClientConnection>();
-            conn->socket = client_socket;
-            conn->address = addr_text;
-            conn->peer = exact_text[0] ? exact_text : addr_text;
-            // A client that stops reading must not hold a relay forever.
-            set_send_timeout(client_socket, 5000);
-            {
-                std::lock_guard<std::mutex> lock(connections_mutex_);
-                connections_.insert(conn);
-            }
-
-            // Threads are detached; stop() waits on connections_ instead of joining,
-            // so finished threads do not pile up for the life of the server.
-            std::thread(&Impl::handle_client, this, conn).detach();
+            return;
         }
+
+        // An IPv4 client on the shared socket arrives as ::ffff:a.b.c.d; it
+        // is named a.b.c.d, so one machine is one address for the lockouts.
+        char addr_text[INET6_ADDRSTRLEN + 4] = "?";
+        char exact_text[INET6_ADDRSTRLEN] = "";  // set only where it differs
+        uint16_t client_port = 0;
+        if (client_addr.ss_family == AF_INET6) {
+            const auto* a = reinterpret_cast<const struct sockaddr_in6*>(&client_addr);
+            client_port = ntohs(a->sin6_port);
+            if (IN6_IS_ADDR_V4MAPPED(&a->sin6_addr)) {
+                inet_ntop(AF_INET, a->sin6_addr.s6_addr + 12, addr_text, sizeof(addr_text));
+            } else if (IN6_IS_ADDR_LOOPBACK(&a->sin6_addr)) {
+                inet_ntop(AF_INET6, &a->sin6_addr, addr_text, sizeof(addr_text));
+            } else if (!options_.allow_global_ipv6 && !IN6_IS_ADDR_LINKLOCAL(&a->sin6_addr) &&
+                       (a->sin6_addr.s6_addr[0] & 0xfe) != 0xfc) {
+                LogLine(this, false) << "Refused an IPv6 connection from outside the local network";
+                close_socket(client_socket);
+                return;
+            } else {
+                // One machine can use any address in its /64 network, so the
+                // network is what gets counted and locked out: changing
+                // address must not buy more room code guesses.
+                inet_ntop(AF_INET6, &a->sin6_addr, exact_text, sizeof(exact_text));
+                struct in6_addr network = a->sin6_addr;
+                std::memset(network.s6_addr + 8, 0, 8);
+                inet_ntop(AF_INET6, &network, addr_text, sizeof(addr_text));
+                std::strncat(addr_text, "/64", sizeof(addr_text) - std::strlen(addr_text) - 1);
+            }
+        } else {
+            const auto* a = reinterpret_cast<const struct sockaddr_in*>(&client_addr);
+            client_port = ntohs(a->sin_port);
+            inet_ntop(AF_INET, &a->sin_addr, addr_text, sizeof(addr_text));
+        }
+        LogLine(this, false) << "New client connected from " << addr_text << " port " << client_port;
+
+        if (!admit_pending(addr_text)) {
+            // Too many connections from one address that haven't joined.
+            close_socket(client_socket);
+            return;
+        }
+
+        auto conn = std::make_shared<ClientConnection>();
+        conn->socket = client_socket;
+        conn->address = addr_text;
+        conn->peer = exact_text[0] ? exact_text : addr_text;
+        set_nonblocking(client_socket);
+        const auto now = std::chrono::steady_clock::now();
+        conn->client_id = generate_client_id();
+        conn->session = session_manager_->create_session(conn->client_id);
+        conn->session_id = conn->session.session_id;
+        conn->deadline = now + kHandshakeTimeout;
+        conn->out_progress = now;
+        LogLine(this, false) << "Created session " << conn->session_id << " for client " << conn->client_id;
+
+        std::lock_guard<std::mutex> lock(connections_mutex_);
+        connections_.insert(conn);
     }
 
-    void stop() {
-        running_ = false;
+    // The event loop: one thread waits on every socket at once and does whatever
+    // each is ready for. Nothing here waits on a single client: reads and writes
+    // never block, and output a client is slow to take is queued.
+    void run() {
+        {
+            std::lock_guard<std::mutex> lock(connections_mutex_);
+            loop_active_ = true;
+        }
+        std::vector<std::shared_ptr<ClientConnection>> conns;
+        std::vector<pollfd> fds;
+        while (running_) {
+            {
+                std::lock_guard<std::mutex> lock(connections_mutex_);
+                conns.assign(connections_.begin(), connections_.end());
+            }
+            const auto now = std::chrono::steady_clock::now();
 
+            // When clients are slow to take what is queued for them, stop
+            // taking new input until it drains, so the queues stay bounded.
+            size_t queued = 0;
+            std::vector<bool> has_output(conns.size(), false);
+            for (size_t i = 0; i < conns.size(); ++i) {
+                std::lock_guard<std::mutex> lock(conns[i]->send_mutex);
+                queued += conns[i]->out.size();
+                has_output[i] = !conns[i]->out.empty();
+            }
+            const bool reading = queued < kPauseReadingAbove;
+
+            fds.clear();
+            pollfd listener{};
+            listener.fd = static_cast<socket_t>(server_socket_.load());
+            listener.events = POLLIN;
+            fds.push_back(listener);
+            for (size_t i = 0; i < conns.size(); ++i) {
+                pollfd entry{};
+                entry.fd = static_cast<socket_t>(conns[i]->socket);
+                if (reading && now >= conns[i]->paused_until) {
+                    entry.events |= POLLIN;
+                }
+                if (has_output[i]) {
+                    entry.events |= POLLOUT;
+                }
+                fds.push_back(entry);
+            }
+#ifdef _WIN32
+            const int ready = WSAPoll(fds.data(), static_cast<ULONG>(fds.size()), kLoopTickMs);
+#else
+            const int ready = poll(fds.data(), fds.size(), kLoopTickMs);
+#endif
+            if (ready < 0) {
+                // Interrupted, or the listener went away under us while stopping.
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
+            if (fds[0].revents & POLLIN) {
+                accept_one();
+            }
+
+            for (size_t i = 0; i < conns.size(); ++i) {
+                const std::shared_ptr<ClientConnection>& conn = conns[i];
+                const auto revents = fds[i + 1].revents;
+                if (conn->alive && (revents & (POLLIN | POLLHUP | POLLERR))) {
+                    read_input(conn);
+                }
+                if (conn->alive) {
+                    process_input(conn);
+                }
+                bool stalled = false;
+                {
+                    std::lock_guard<std::mutex> lock(conn->send_mutex);
+                    if (!conn->out.empty()) {
+                        flush_locked(conn);
+                    }
+                    stalled = !conn->out.empty() &&
+                              std::chrono::steady_clock::now() - conn->out_progress > kOutputStall;
+                }
+                if (stalled && conn->alive) {
+                    LogLine(this, false) << "Dropped a client that stopped reading";
+                    conn->alive = false;
+                }
+                if (conn->alive && conn->stage != ClientConnection::Stage::Chat && now > conn->deadline) {
+                    LogLine(this, true) << "Handshake failed for client " << conn->client_id;
+                    conn->alive = false;
+                }
+                if (!conn->alive) {
+                    close_connection(conn);
+                }
+            }
+        }
+
+        // Stopping: every connection is closed before stop() is let go.
+        {
+            std::lock_guard<std::mutex> lock(connections_mutex_);
+            conns.assign(connections_.begin(), connections_.end());
+        }
+        for (const auto& conn : conns) {
+            close_connection(conn);
+        }
         const intptr_t listener = server_socket_.exchange(-1);
         if (listener >= 0) {
             close_socket(listener);
         }
-
-        // Cut every connection now. A relay to a client that has stopped
-        // reading can be stuck in send(); shutting the socket down wakes it,
-        // so ending the chat never waits on someone else's connection.
-        std::unique_lock<std::mutex> lock(connections_mutex_);
-        for (const auto& c : connections_) {
-            shutdown_socket(c->socket);
+        {
+            std::lock_guard<std::mutex> lock(connections_mutex_);
+            loop_active_ = false;
         }
-        // Each client thread then notices and finishes on its own.
-        connections_cv_.wait(lock, [this] { return connections_.empty(); });
+        connections_cv_.notify_all();
+    }
+
+    // Takes what the socket has, without waiting for more.
+    void read_input(const std::shared_ptr<ClientConnection>& conn) {
+        uint8_t buffer[65536];
+        for (int round = 0; round < 4; ++round) {
+            const int received = recv(static_cast<socket_t>(conn->socket), reinterpret_cast<char*>(buffer),
+                                      static_cast<int>(sizeof(buffer)), 0);
+            if (received > 0) {
+                conn->in.insert(conn->in.end(), buffer, buffer + received);
+                if (received < static_cast<int>(sizeof(buffer))) {
+                    return;
+                }
+            } else {
+                if (received == 0 || !would_block()) {
+                    conn->alive = false;  // closed, or broken
+                }
+                return;
+            }
+        }
+    }
+
+    // Handles every whole frame received so far. Each frame has a 4-byte
+    // big-endian length in front, so one split across packets waits here until
+    // the rest arrives.
+    void process_input(const std::shared_ptr<ClientConnection>& conn) {
+        size_t at = 0;
+        while (conn->alive && conn->in.size() - at >= 4 && std::chrono::steady_clock::now() >= conn->paused_until) {
+            const uint8_t* head = conn->in.data() + at;
+            const uint32_t length = (static_cast<uint32_t>(head[0]) << 24) | (static_cast<uint32_t>(head[1]) << 16) |
+                                    (static_cast<uint32_t>(head[2]) << 8) | static_cast<uint32_t>(head[3]);
+            if (length == 0 || length > MAX_FRAME_SIZE) {
+                conn->alive = false;
+                break;
+            }
+            if (conn->in.size() - at - 4 < length) {
+                break;
+            }
+            const std::vector<uint8_t> frame(head + 4, head + 4 + length);
+            at += 4 + static_cast<size_t>(length);
+            if (!handle_frame(conn, frame)) {
+                conn->alive = false;
+            }
+        }
+        conn->in.erase(conn->in.begin(), conn->in.begin() + static_cast<std::ptrdiff_t>(at));
+    }
+
+    // One frame, according to how far the connection has got. False: close it.
+    bool handle_frame(const std::shared_ptr<ClientConnection>& conn, const std::vector<uint8_t>& frame) {
+        try {
+            switch (conn->stage) {
+                case ClientConnection::Stage::Hello:
+                    if (!handshake_hello(conn, frame)) {
+                        LogLine(this, true) << "Handshake failed for client " << conn->client_id;
+                        return false;
+                    }
+                    conn->stage = ClientConnection::Stage::Confirm;
+                    return true;
+                case ClientConnection::Stage::Confirm:
+                    if (!handshake_confirm(conn, frame)) {
+                        LogLine(this, true) << "Handshake failed for client " << conn->client_id;
+                        return false;
+                    }
+                    conn->stage = ClientConnection::Stage::Chat;
+                    LogLine(this, false) << "Handshake completed successfully for client " << conn->client_id;
+                    return true;
+                case ClientConnection::Stage::Chat:
+                    return handle_encrypted_frame(conn, frame);
+            }
+        } catch (const std::exception& e) {
+            LogLine(this, true) << "Error handling client: " << e.what();
+        }
+        return false;
+    }
+
+    void stop() {
+        running_ = false;
+        {
+            // run() notices within a tick, closes every connection and the
+            // listener, and only then lets us go.
+            std::unique_lock<std::mutex> lock(connections_mutex_);
+            connections_cv_.wait(lock, [this] { return !loop_active_; });
+        }
+        // Started but never run: only the listener is open.
+        const intptr_t listener = server_socket_.exchange(-1);
+        if (listener >= 0) {
+            close_socket(listener);
+        }
     }
 
     size_t people() {
@@ -595,25 +812,9 @@ struct SecureServer::Impl {
         return banned_addresses_.count(address) > 0;
     }
 
-    void handle_client(std::shared_ptr<ClientConnection> conn) {
-        try {
-            uint32_t client_id = generate_client_id();
-            SessionInfo session = session_manager_->create_session(client_id);
-            conn->session_id = session.session_id;
-
-            LogLine(this, false) << "Created session " << session.session_id << " for client " << client_id;
-
-            if (!perform_handshake(conn->socket, session)) {
-                LogLine(this, true) << "Handshake failed for client " << client_id;
-            } else {
-                LogLine(this, false) << "Handshake completed successfully for client " << client_id;
-                handle_encrypted_messages(conn, session);
-            }
-
-        } catch (const std::exception& e) {
-            LogLine(this, true) << "Error handling client: " << e.what();
-        }
-
+    // Everything that ends a connection: it leaves its rooms, its name is freed
+    // and the others are told, then the socket is closed. Loop thread only.
+    void close_connection(const std::shared_ptr<ClientConnection>& conn) {
         conn->alive = false;
         if (!conn->counted_joined) {
             release_pending(conn->address);
@@ -632,30 +833,21 @@ struct SecureServer::Impl {
             session_manager_->remove_session(conn->session_id);
         }
         LogLine(this, false) << "Client disconnected";
-
-        // Order matters here:
-        // 1. shutdown wakes any relay stuck sending to this client (stop() may
-        //    be waiting on it), without freeing the descriptor;
-        // 2. the entry leaves the list, so stop() never touches this socket
-        //    again (it only cuts sockets of connections still listed);
-        // 3. the socket is closed under send_mutex, so a relaying thread cannot
-        //    write to it mid-close, or to a connection that reuses the
-        //    descriptor afterwards. conn stays alive through our shared_ptr.
-        shutdown_socket(conn->socket);
         {
-            std::lock_guard<std::mutex> lock(connections_mutex_);
-            connections_.erase(conn);
-            // stop() may return (and the server go away) once this is seen;
-            // nothing below touches the server.
-            connections_cv_.notify_all();
+            // Under send_mutex, so another thread (the host removing someone)
+            // can't be writing to the socket as it closes. What is already
+            // queued, such as the reason for a refusal, gets one last try.
+            std::lock_guard<std::mutex> send_lock(conn->send_mutex);
+            flush_locked(conn);
+            close_socket(conn->socket);
+            conn->socket = -1;
         }
-        std::lock_guard<std::mutex> send_lock(conn->send_mutex);
-        close_socket(conn->socket);
-        conn->socket = -1;
+        std::lock_guard<std::mutex> lock(connections_mutex_);
+        connections_.erase(conn);
     }
 
     // Sends a header-only error frame on a socket not yet tied to a connection.
-    void send_raw_error(intptr_t client_socket, ErrorCode code) {
+    void send_raw_error(const std::shared_ptr<ClientConnection>& conn, ErrorCode code) {
         MessageHeader header{};
         header.version = PROTOCOL_VERSION;
         header.type = MessageType::ERROR_MESSAGE;
@@ -664,15 +856,15 @@ struct SecureServer::Impl {
         std::vector<uint8_t> frame = serialize_header(header);
         const uint8_t* p = reinterpret_cast<const uint8_t*>(&code);
         frame.insert(frame.end(), p, p + sizeof(ErrorCode));
-        send_data(client_socket, frame);
+        std::lock_guard<std::mutex> lock(conn->send_mutex);
+        send_data(conn, frame);
     }
 
-    bool perform_handshake(intptr_t client_socket, SessionInfo& session) {
+    // Steps 1 to 3, on the client's hello: check it, make our keys and answer.
+    bool handshake_hello(const std::shared_ptr<ClientConnection>& conn, const std::vector<uint8_t>& handshake_data) {
+        SessionInfo& session = conn->session;
         try {
-            const auto deadline = std::chrono::steady_clock::now() + kHandshakeTimeout;
-
-            // Step 1: receive the client's hello.
-            std::vector<uint8_t> handshake_data = receive_data(client_socket, &deadline);
+            // Step 1: the client's hello.
             if (handshake_data.size() < sizeof(MessageHeader) + sizeof(HandshakeMessage)) {
                 LogLine(this, true) << "Handshake message too short";
                 return false;
@@ -685,7 +877,7 @@ struct SecureServer::Impl {
             if (header.version != PROTOCOL_VERSION) {
                 // An older client: tell it so instead of half-working.
                 LogLine(this, false) << "Refused a client using an older protocol version";
-                send_raw_error(client_socket, ErrorCode::INVALID_PROTOCOL_VERSION);
+                send_raw_error(conn, ErrorCode::INVALID_PROTOCOL_VERSION);
                 return false;
             }
 
@@ -745,13 +937,28 @@ struct SecureServer::Impl {
             response_data.insert(response_data.end(), identity_.public_raw.begin(), identity_.public_raw.end());
             response_data.insert(response_data.end(), signature.begin(), signature.end());
 
-            if (!send_data(client_socket, response_data)) {
+            bool sent = false;
+            {
+                std::lock_guard<std::mutex> lock(conn->send_mutex);
+                sent = send_data(conn, response_data);
+            }
+            if (!sent) {
                 LogLine(this, true) << "Failed to send handshake response";
                 return false;
             }
 
-            // Step 4: the client confirms.
-            std::vector<uint8_t> complete_data = receive_data(client_socket, &deadline);
+            return true;
+
+        } catch (const std::exception& e) {
+            LogLine(this, true) << "Handshake error: " << e.what();
+            return false;
+        }
+    }
+
+    // Step 4, on the client's next frame: it confirms.
+    bool handshake_confirm(const std::shared_ptr<ClientConnection>& conn, const std::vector<uint8_t>& complete_data) {
+        SessionInfo& session = conn->session;
+        try {
             if (complete_data.size() < sizeof(MessageHeader)) {
                 LogLine(this, true) << "Handshake confirmation missing";
                 return false;
@@ -802,16 +1009,17 @@ struct SecureServer::Impl {
         return true;
     }
 
-    void handle_encrypted_messages(const std::shared_ptr<ClientConnection>& conn,
-                                   SessionInfo& session) {
-        const intptr_t client_socket = conn->socket;
-
-        while (running_) {
+    // Handles one frame from a connection that has finished the handshake.
+    // False: close the connection.
+    // The body was written as a loop over frames and keeps that shape: inside
+    // it `continue` means "done with this frame" and `break` means "close the
+    // connection". The loop below runs once; pass tells the two apart.
+    bool handle_encrypted_frame(const std::shared_ptr<ClientConnection>& conn,
+                                const std::vector<uint8_t>& encrypted_data) {
+        SessionInfo& session = conn->session;
+        int pass = 0;
+        for (; pass < 1; ++pass) {
             try {
-                std::vector<uint8_t> encrypted_data = receive_data(client_socket, nullptr, &conn->alive);
-                if (encrypted_data.empty()) {
-                    break; // Client disconnected
-                }
 
                 MessageHeader header = deserialize_header(encrypted_data);
                 
@@ -846,7 +1054,9 @@ struct SecureServer::Impl {
                             !room_code_matches(get_chat_field(chat.recipient, MAX_NAME_LEN))) {
                             // Slow down guessing, and give up on a connection after five tries.
                             guess_failed(conn->address);
-                            std::this_thread::sleep_for(std::chrono::seconds(1));
+                            // Nothing more from this connection is looked at for a
+                            // second (sleeping here would stall everyone else).
+                            conn->paused_until = std::chrono::steady_clock::now() + std::chrono::seconds(1);
                             ChatMessage refusal = make_chat(ChatType::REGISTER_FAIL);
                             set_chat_text(refusal, "Wrong room code");
                             send_chat(conn, refusal);
@@ -1121,6 +1331,7 @@ struct SecureServer::Impl {
                 break;
             }
         }
+        return pass == 1;
     }
 
     // Direct messages kept for people who are away. Only for names seen in this
@@ -1352,7 +1563,7 @@ struct SecureServer::Impl {
                 return;
             }
 
-            if (!send_data(conn->socket, frame)) {
+            if (!send_data(conn, frame)) {
                 drop_locked(conn);
                 return;
             }
@@ -1376,8 +1587,7 @@ struct SecureServer::Impl {
     // name; otherwise it would stay "online" and never get another message.
     // The caller holds send_mutex, so the socket has not been closed yet.
     void drop_locked(const std::shared_ptr<ClientConnection>& conn) {
-        conn->alive = false;
-        shutdown_socket(conn->socket);
+        conn->alive = false;  // the loop closes it on its next pass
     }
 
     void broadcast_presence(const std::string& name, bool joined, const std::string& except) {
@@ -1442,7 +1652,7 @@ struct SecureServer::Impl {
         const std::string marker = ROTATION_MARKER;
         std::vector<uint8_t> frame =
             seal_frame(conn, MessageType::KEY_ROTATION, std::vector<uint8_t>(marker.begin(), marker.end()));
-        if (frame.empty() || !send_data(conn->socket, frame)) {
+        if (frame.empty() || !send_data(conn, frame)) {
             return false;
         }
         session_manager_->rotate_tx_key(conn->session_id);
@@ -1467,79 +1677,47 @@ struct SecureServer::Impl {
 
         std::lock_guard<std::mutex> lock(conn->send_mutex);
         if (conn->alive) {
-            send_data(conn->socket, response_data);
+            send_data(conn, response_data);
         }
     }
 
-    // deadline, when given, is the latest the whole read may take. alive, when
-    // given, ends the read once the connection has been dropped: on Windows
-    // shutting our own socket down does not wake a wait for the peer's data.
-    bool receive_all(intptr_t client_socket, uint8_t* data, size_t length,
-                     const std::chrono::steady_clock::time_point* deadline = nullptr,
-                     const std::atomic<bool>* alive = nullptr) {
-        size_t total = 0;
-        while (total < length) {
-            if (deadline && std::chrono::steady_clock::now() >= *deadline) {
-                return false;
+    // Writes as much queued output as the socket will take right now. The
+    // caller holds conn->send_mutex.
+    void flush_locked(const std::shared_ptr<ClientConnection>& conn) {
+        while (!conn->out.empty() && conn->socket >= 0) {
+            const size_t chunk = (std::min<size_t>)(conn->out.size(), 256 * 1024);
+            const int sent = send(static_cast<socket_t>(conn->socket), reinterpret_cast<const char*>(conn->out.data()),
+                                  static_cast<int>(chunk), kSendFlags);
+            if (sent > 0) {
+                conn->out.erase(conn->out.begin(), conn->out.begin() + sent);
+                conn->out_progress = std::chrono::steady_clock::now();
+            } else {
+                if (!would_block()) {
+                    conn->alive = false;
+                }
+                return;
             }
-            const int ready = wait_readable(client_socket, 500);
-            if (ready < 0 || (ready == 0 && (!running_ || (alive && !*alive)))) {
-                return false;
-            }
-            if (ready == 0) {
-                continue;
-            }
-            int received = recv(static_cast<socket_t>(client_socket), reinterpret_cast<char*>(data + total),
-                                static_cast<int>(length - total), 0);
-            if (received <= 0) {
-                return false;
-            }
-            total += static_cast<size_t>(received);
         }
-        return true;
     }
 
-    std::vector<uint8_t> receive_data(intptr_t client_socket,
-                                      const std::chrono::steady_clock::time_point* deadline = nullptr,
-                                      const std::atomic<bool>* alive = nullptr) {
-        uint32_t length_be = 0;
-        if (!receive_all(client_socket, reinterpret_cast<uint8_t*>(&length_be), sizeof(length_be), deadline, alive)) {
-            return std::vector<uint8_t>();
-        }
-
-        uint32_t length = ntohl(length_be);
-        if (length == 0 || length > MAX_FRAME_SIZE) {
-            return std::vector<uint8_t>();
-        }
-
-        std::vector<uint8_t> buffer(length);
-        if (!receive_all(client_socket, buffer.data(), length, deadline, alive)) {
-            return std::vector<uint8_t>();
-        }
-        return buffer;
-    }
-
-    bool send_all(intptr_t client_socket, const uint8_t* data, size_t length) {
-        size_t total = 0;
-        while (total < length) {
-            int sent = send(static_cast<socket_t>(client_socket), reinterpret_cast<const char*>(data + total),
-                            static_cast<int>(length - total), kSendFlags);
-            if (sent <= 0) {
-                return false;
-            }
-            total += static_cast<size_t>(sent);
-        }
-        return true;
-    }
-
-    // Every message is framed with a 4-byte big-endian length so that a message
-    // larger than one recv() buffer, or split across TCP segments, still arrives whole.
-    bool send_data(intptr_t client_socket, const std::vector<uint8_t>& data) {
-        uint32_t length = htonl(static_cast<uint32_t>(data.size()));
-        if (!send_all(client_socket, reinterpret_cast<const uint8_t*>(&length), sizeof(length))) {
+    // Queues one frame behind its 4-byte big-endian length and writes what the
+    // socket will take; the loop writes the rest as the client reads. False if
+    // the connection is closed or far too much is already waiting for it. The
+    // caller holds conn->send_mutex.
+    bool send_data(const std::shared_ptr<ClientConnection>& conn, const std::vector<uint8_t>& data) {
+        if (conn->socket < 0 || conn->out.size() + data.size() + 4 > kMaxQueuedOutput) {
             return false;
         }
-        return send_all(client_socket, data.data(), data.size());
+        if (conn->out.empty()) {
+            conn->out_progress = std::chrono::steady_clock::now();
+        }
+        const uint32_t length = static_cast<uint32_t>(data.size());
+        const uint8_t prefix[4] = {static_cast<uint8_t>(length >> 24), static_cast<uint8_t>(length >> 16),
+                                   static_cast<uint8_t>(length >> 8), static_cast<uint8_t>(length)};
+        conn->out.insert(conn->out.end(), prefix, prefix + 4);
+        conn->out.insert(conn->out.end(), data.begin(), data.end());
+        flush_locked(conn);
+        return true;
     }
 };
 
