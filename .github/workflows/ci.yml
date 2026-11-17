@@ -36,7 +36,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install Qt
-        uses: jurplel/install-qt-action@v4
+        # Pinned to a commit: a third-party action in the job that builds the release.
+        uses: jurplel/install-qt-action@b344308e4483fc892e0d27b3cd1b173ebdd95f06 # v4.5.0
         with:
           version: '6.8.3'
           arch: win64_msvc2022_64
