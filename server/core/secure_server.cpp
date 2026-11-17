@@ -66,29 +66,6 @@ static void close_socket(intptr_t s) {
 #endif
 }
 
-// Waits up to timeout_ms for the socket to become readable: > 0 ready, 0 timed
-// out, < 0 error. Blocking calls are polled this way so threads notice a shutdown:
-// on Windows, neither shutdown() nor a signal interrupts a recv() or accept()
-// already in progress.
-// poll() rather than select(): FD_SET on a descriptor >= FD_SETSIZE writes out of bounds.
-static void shutdown_socket(intptr_t s) {
-#ifdef _WIN32
-    shutdown(static_cast<SOCKET>(s), SD_BOTH);
-#else
-    shutdown(static_cast<int>(s), SHUT_RDWR);
-#endif
-}
-
-static void set_send_timeout(intptr_t s, int ms) {
-#ifdef _WIN32
-    const DWORD value = static_cast<DWORD>(ms);
-    setsockopt(static_cast<SOCKET>(s), SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&value), sizeof(value));
-#else
-    timeval value{ms / 1000, (ms % 1000) * 1000};
-    setsockopt(static_cast<int>(s), SOL_SOCKET, SO_SNDTIMEO, &value, sizeof(value));
-#endif
-}
-
 // Linux raises SIGPIPE on a send to a closed socket, which would end the whole
 // process (the desktop app too, when it hosts); ask for an error instead.
 #ifdef MSG_NOSIGNAL
@@ -126,18 +103,6 @@ static bool would_block() {
     return WSAGetLastError() == WSAEWOULDBLOCK;
 #else
     return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR;
-#endif
-}
-
-static int wait_readable(intptr_t s, int timeout_ms) {
-    pollfd p{};
-    p.events = POLLIN;
-#ifdef _WIN32
-    p.fd = static_cast<SOCKET>(s);
-    return WSAPoll(&p, 1, timeout_ms);
-#else
-    p.fd = static_cast<int>(s);
-    return poll(&p, 1, timeout_ms);
 #endif
 }
 
