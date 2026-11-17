@@ -253,6 +253,26 @@ private slots:
         QVERIFY(!ivy.send(QString(static_cast<int>(SecureComm::MAX_DIRECT_TEXT) + 1, QLatin1Char('x'))));
     }
 
+    void read_receipts_can_be_switched_off() {
+        ChatController kim, lea;
+        kim.signIn("127.0.0.1", SecureComm::DEFAULT_PORT, "kim");
+        lea.signIn("127.0.0.1", SecureComm::DEFAULT_PORT, "lea");
+        QTRY_COMPARE_WITH_TIMEOUT(kim.state(), ChatController::Online, kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(lea.state(), ChatController::Online, kWait);
+        QVERIFY(lea.readReceipts());
+        lea.setReadReceipts(false);
+        QVERIFY(!lea.readReceipts());
+
+        kim.setCurrentConversation("lea");
+        QVERIFY(kim.send("private"));
+        QTRY_COMPARE_WITH_TIMEOUT(kim.receipt(), QStringLiteral("Delivered"), kWait);
+        lea.setCurrentConversation("kim");
+        QTest::qWait(500);
+        QCOMPARE(kim.receipt(), QStringLiteral("Delivered"));  // never "Read"
+
+        lea.setReadReceipts(true);  // the setting is shared by every test here
+    }
+
     void receipts_and_away_messages() {
         ChatController gina;
         auto hugo = std::make_unique<ChatController>();

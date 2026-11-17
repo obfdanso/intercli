@@ -482,6 +482,33 @@ Rectangle {
                 }
             }
 
+            // Read receipts: whether others see that we have read their messages.
+            Item { width: 1; height: 10 }
+            Rectangle {
+                width: parent.width
+                height: 44
+                radius: Theme.radiusCard
+                color: Theme.raised
+                Text {
+                    textFormat: Text.PlainText
+                    x: 12
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: parent.width - 70
+                    text: "Tell others when I've read their messages"
+                    color: Theme.text
+                    font.pixelSize: 12
+                    wrapMode: Text.Wrap
+                }
+                Toggle {
+                    anchors.right: parent.right
+                    anchors.rightMargin: 12
+                    anchors.verticalCenter: parent.verticalCenter
+                    name: "Tell others when I've read their messages"
+                    checked: Chat.readReceipts
+                    onToggled: Chat.readReceipts = !checked
+                }
+            }
+
             // Saved messages: the switch, and the follow-up question when it is turned off.
             Item { width: 1; height: Chat.historyAvailable ? 10 : 0 }
             Rectangle {

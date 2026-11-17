@@ -706,6 +706,17 @@ void ChatController::setSearch(const QString& text) {
     filter_->setFilterFixedString(text);
 }
 
+bool ChatController::readReceipts() const {
+    return QSettings().value("privacy/readReceipts", true).toBool();
+}
+
+void ChatController::setReadReceipts(bool on) {
+    if (on != readReceipts()) {
+        QSettings().setValue("privacy/readReceipts", on);
+        emit readReceiptsChanged();
+    }
+}
+
 int ChatController::historyChoice() const {
     return history_ && !identity_.isEmpty() ? static_cast<int>(history_->choice(identity_)) : 0;
 }
@@ -801,7 +812,7 @@ void ChatController::setReceipt(const QString& conversation, const QString& text
 // The user is looking at this conversation: tell the other person, once, that
 // what they sent has been read.
 void ChatController::markSeen(const QString& conversation) {
-    if (owes_read_.remove(conversation) && client_ && state_ == Online) {
+    if (owes_read_.remove(conversation) && client_ && state_ == Online && readReceipts()) {
         client_->send_read(ss(conversation));
     }
 }

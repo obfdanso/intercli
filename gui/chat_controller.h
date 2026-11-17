@@ -54,6 +54,9 @@ class ChatController : public QObject {
     Q_PROPERTY(bool windowActive READ windowActive WRITE setWindowActive NOTIFY windowActiveChanged)
     Q_PROPERTY(bool historyAvailable READ historyAvailable CONSTANT)
     Q_PROPERTY(int historyChoice READ historyChoice NOTIFY historyChoiceChanged)
+    // Whether others are told when we have read their direct messages. On by
+    // default; kept on this PC.
+    Q_PROPERTY(bool readReceipts READ readReceipts WRITE setReadReceipts NOTIFY readReceiptsChanged)
     // Same-room chats.
     Q_PROPERTY(Intercli::ChatFinder* nearby READ nearby CONSTANT)
     Q_PROPERTY(bool hostingAvailable READ hostingAvailable CONSTANT)
@@ -107,6 +110,8 @@ public:
     void setKeyStore(std::shared_ptr<SecureComm::KeyStore> store) { key_store_ = std::move(store); }
     bool historyAvailable() const { return history_ != nullptr; }
     int historyChoice() const;
+    bool readReceipts() const;
+    void setReadReceipts(bool on);
     void setWindowActive(bool active);
 
     ChatFinder* nearby() const { return finder_; }
@@ -199,6 +204,7 @@ signals:
     void receiptChanged();
     void peerSafetyCodeChanged();
     void historyChoiceChanged();
+    void readReceiptsChanged();
     void hostingChanged();
     void peopleInChatChanged();
     void publicNetworkChanged();

@@ -258,6 +258,7 @@ Registered as alice
 | `/verify bob` | Show the safety code you share with bob |
 | `hello` | Broadcast to everyone else online |
 | `/who` | List who is currently online |
+| `/receipts off` | Stop telling others when you have read their messages (`/receipts on` to start again) |
 | `rotate` | Rotate your send key |
 | `quit` | Disconnect |
 

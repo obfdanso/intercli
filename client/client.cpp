@@ -3,6 +3,7 @@
 #include "chat_client.h"
 #include "downloads.h"
 #include "../crypto/crypto_utils.h"
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <ctime>
@@ -89,6 +90,7 @@ public:
                   << "\n  /verify name   show the safety code you share with someone"
                   << "\n  message        send to everyone"
                   << "\n  /who           list who is online"
+                  << "\n  /receipts off  stop telling others you read their messages (on: start again)"
                   << "\n  /join room     join a room, creating it if needed"
                   << "\n  #room message  send to a room you are in"
                   << "\n  /leave room    leave a room"
@@ -141,7 +143,9 @@ private:
             // A message kept while we were away says when it was written.
             const bool old = std::chrono::system_clock::now() - sent > std::chrono::minutes(1);
             print_incoming("[" + from + " -> you] " + (old ? "(sent " + when(sent) + ") " : "") + text);
-            client_.send_read(from);  // on screen is as read as a terminal gets
+            if (read_receipts_) {
+                client_.send_read(from);  // on screen is as read as a terminal gets
+            }
         };
         ev.on_receipt = [](const std::string& peer, const std::string& what) {
             if (what == "queued") {
@@ -240,6 +244,14 @@ private:
     bool send_line(const std::string& line) {
         if (line == "/who") {
             return client_.request_roster();
+        }
+
+        if (line == "/receipts on" || line == "/receipts off") {
+            read_receipts_ = line == "/receipts on";
+            std::cout << (read_receipts_ ? "Others are told when you have read their messages"
+                                         : "Others are no longer told when you have read their messages")
+                      << std::endl;
+            return true;
         }
 
         if (line.rfind("/verify", 0) == 0) {
@@ -343,6 +355,7 @@ private:
     }
 
     SecureComm::ChatClient client_;
+    std::atomic<bool> read_receipts_{true};
     std::string room_code_;
     std::mutex register_mutex_;
     std::condition_variable register_cv_;
