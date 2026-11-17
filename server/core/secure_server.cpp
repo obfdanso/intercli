@@ -86,6 +86,10 @@ constexpr size_t kPauseReadingAbove = 4 * 1024 * 1024;
 constexpr size_t kMaxQueuedOutput = 16 * 1024 * 1024;
 // and give up on a client that has taken nothing for this long.
 constexpr std::chrono::seconds kOutputStall(5);
+// A client with more than this waiting must also keep taking it at a real
+// rate (this much every kOutputStall), or it is dropped: reading a byte now
+// and then must not let one client hold up everyone else.
+constexpr size_t kSlowClientMark = 256 * 1024;
 constexpr int kLoopTickMs = 50;
 
 static void set_nonblocking(intptr_t s) {
@@ -133,6 +137,8 @@ struct ClientConnection {
     std::vector<uint8_t> in;               // bytes received, not yet a whole frame
     std::vector<uint8_t> out;              // frames waiting for the socket to take them
     std::chrono::steady_clock::time_point out_progress{};  // when out last shrank
+    std::chrono::steady_clock::time_point out_window{};    // start of the current rate check, if one is on
+    size_t            out_window_sent = 0;                 // bytes the client took since then
     std::chrono::steady_clock::time_point deadline{};      // the handshake must be done by then
     std::chrono::steady_clock::time_point paused_until{};  // input is not looked at before then
 };
@@ -560,11 +566,21 @@ struct SecureServer::Impl {
                     if (!conn->out.empty()) {
                         flush_locked(conn);
                     }
-                    stalled = !conn->out.empty() &&
-                              std::chrono::steady_clock::now() - conn->out_progress > kOutputStall;
+                    const auto after = std::chrono::steady_clock::now();
+                    stalled = !conn->out.empty() && after - conn->out_progress > kOutputStall;
+                    if (conn->out.size() <= kSlowClientMark) {
+                        conn->out_window = {};  // little waiting: no rate to check
+                    } else if (conn->out_window == std::chrono::steady_clock::time_point{}) {
+                        conn->out_window = after;
+                        conn->out_window_sent = 0;
+                    } else if (after - conn->out_window > kOutputStall) {
+                        stalled = stalled || conn->out_window_sent < kSlowClientMark;
+                        conn->out_window = after;
+                        conn->out_window_sent = 0;
+                    }
                 }
                 if (stalled && conn->alive) {
-                    LogLine(this, false) << "Dropped a client that stopped reading";
+                    LogLine(this, false) << "Dropped a client that stopped reading or reads too slowly";
                     conn->alive = false;
                 }
                 if (conn->alive && conn->stage != ClientConnection::Stage::Chat && now > conn->deadline) {
@@ -1677,6 +1693,7 @@ struct SecureServer::Impl {
             if (sent > 0) {
                 conn->out.erase(conn->out.begin(), conn->out.begin() + sent);
                 conn->out_progress = std::chrono::steady_clock::now();
+                conn->out_window_sent += static_cast<size_t>(sent);
             } else {
                 if (!would_block()) {
                     conn->alive = false;
