@@ -1109,9 +1109,9 @@ struct SecureServer::Impl {
                                       << session.session_id;
                             broadcast_presence(wanted, true, wanted);
                             // In this order: what was kept is checked against the
-                            // address the name had before this join.
-                            deliver_kept(conn);
+                            // address and key the name had before this join.
                             conn->e2e_key = offered_key;
+                            deliver_kept(conn);
                             remember_name(wanted, conn->peer, offered_key);
                         }
                         continue;
@@ -1435,6 +1435,14 @@ struct SecureServer::Impl {
             if (owner == seen_names_.end() || owner->second != conn->peer) {
                 LogLine(this, false) << "Dropped messages kept for " << conn->name
                                      << ": the name came back from a different address";
+                return;
+            }
+            // They were sealed for the key the name had, so only someone with
+            // that key gets them at all, not just someone who can't read them.
+            const auto key = seen_keys_.find(conn->name);
+            if (key != seen_keys_.end() && !key->second.empty() && key->second != conn->e2e_key) {
+                LogLine(this, false) << "Dropped messages kept for " << conn->name
+                                     << ": the name came back with a different key";
                 return;
             }
         }

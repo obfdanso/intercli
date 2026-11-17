@@ -647,9 +647,11 @@ static void end_to_end_tests() {
     check(eve.connect("127.0.0.1", 18135, &error), "someone else connects");
     eve.request_name("ben");
     check(eve_ears.wait("registered:ben"), "and takes ben's name");
-    check(eve_ears.wait("notice:A private message from ann could not be read"),
-          "the kept message cannot be read with another key");
-    check(!eve_ears.heard("direct:ann:for ben only"), "so it is never shown");
+    check(!eve_ears.wait("notice:1 message arrived while you were away", 1500),
+          "the server does not hand a kept message to someone with another key");
+    check(!eve_ears.heard("notice:A private message from ann could not be read") &&
+              !eve_ears.heard("direct:ann:for ben only"),
+          "so it never reaches them at all");
 
     a.send_direct("ben", "ben, it's me");
     check(a_ears.wait("key:ben:changed"), "the sender is warned that ben's key is different");
