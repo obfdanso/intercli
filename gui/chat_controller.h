@@ -8,6 +8,7 @@
 
 #include <QAbstractItemModel>
 #include <QHash>
+#include <QSet>
 #include <QObject>
 #include <QSortFilterProxyModel>
 #include <QString>
@@ -41,6 +42,9 @@ class ChatController : public QObject {
     Q_PROPERTY(int onlineCount READ onlineCount NOTIFY onlineCountChanged)
     Q_PROPERTY(QStringList onlineNames READ onlineNames NOTIFY onlineCountChanged)
     Q_PROPERTY(QVariantMap session READ session NOTIFY sessionChanged)
+    // For a direct conversation whose last message is ours: "Delivered", "Read",
+    // or that it is being kept until the other person is back. Else empty.
+    Q_PROPERTY(QString receipt READ receipt NOTIFY receiptChanged)
     Q_PROPERTY(bool windowActive READ windowActive WRITE setWindowActive NOTIFY windowActiveChanged)
     Q_PROPERTY(bool historyAvailable READ historyAvailable CONSTANT)
     Q_PROPERTY(int historyChoice READ historyChoice NOTIFY historyChoiceChanged)
@@ -88,6 +92,7 @@ public:
     QStringList onlineNames() const { return list_->onlineNames(); }
     QVariantMap session() const;
     bool windowActive() const { return window_active_; }
+    QString receipt() const { return receipts_.value(current_); }
     bool historyAvailable() const { return history_ != nullptr; }
     int historyChoice() const;
     void setWindowActive(bool active);
@@ -176,6 +181,7 @@ signals:
     void onlineCountChanged();
     void sessionChanged();
     void windowActiveChanged();
+    void receiptChanged();
     void historyChoiceChanged();
     void hostingChanged();
     void peopleInChatChanged();
@@ -213,6 +219,9 @@ private:
     void onRoster(const QStringList& names);
     void onPresence(const QString& name, bool joined, const QString& raw);
     void onNotice(const QString& text);
+    void onReceipt(const QString& peer, const QString& what);
+    void setReceipt(const QString& conversation, const QString& text);
+    void markSeen(const QString& conversation);
     void onRoomMessage(const QString& room, const QString& from, const QString& text);
     void onRoomEvent(const QString& room, const QString& name, bool joined);
     void forgetRoom(const QString& room);
@@ -234,6 +243,8 @@ private:
     QHash<QString, MessageModel*> models_;
     QString current_;
     QString last_target_;
+    QHash<QString, QString> receipts_;  // per direct conversation, about our latest message
+    QSet<QString> owes_read_;           // people whose messages we haven't looked at yet
     QString download_dir_;
     QStringList rooms_;     // rooms we are in, without the '#'; joined again after a reconnect
     QString pending_room_;  // a room the user just asked to join: opened once the server agrees

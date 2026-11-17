@@ -185,6 +185,9 @@ std::shared_ptr<SecureComm::ChatClient> ChatController::makeClient() {
         const QByteArray bytes(reinterpret_cast<const char*>(data.data()), static_cast<qsizetype>(data.size()));
         post([this, f, target, room, name, bytes] { onFile(qs(f), target, qs(room), qs(name), bytes); });
     };
+    ev.on_receipt = [this, post](const std::string& peer, const std::string& what) {
+        post([this, peer, what] { onReceipt(qs(peer), qs(what)); });
+    };
     ev.on_room_message = [this, post](const std::string& room, const std::string& f, const std::string& t) {
         post([this, room, f, t] { onRoomMessage(qs(room), qs(f), qs(t)); });
     };
@@ -602,6 +605,10 @@ void ChatController::setCurrentConversation(const QString& id) {
     if (current_ != key) {
         current_ = key;
         emit currentConversationChanged();
+        emit receiptChanged();
+    }
+    if (window_active_) {
+        markSeen(key);
     }
 }
 
@@ -610,6 +617,7 @@ void ChatController::setWindowActive(bool active) {
         window_active_ = active;
         if (active) {
             list_->markRead(current_);
+            markSeen(current_);
         }
         emit windowActiveChanged();
     }
@@ -744,8 +752,46 @@ void ChatController::addRow(const QString& conversation, MessageModel::Kind kind
     modelFor(conversation)->append(e);
 }
 
+void ChatController::setReceipt(const QString& conversation, const QString& text) {
+    if (receipts_.value(conversation) != text) {
+        receipts_.insert(conversation, text);
+        if (conversation == current_) {
+            emit receiptChanged();
+        }
+    }
+}
+
+// The user is looking at this conversation: tell the other person, once, that
+// what they sent has been read.
+void ChatController::markSeen(const QString& conversation) {
+    if (owes_read_.remove(conversation) && client_ && state_ == Online) {
+        client_->send_read(ss(conversation));
+    }
+}
+
+void ChatController::onReceipt(const QString& peer, const QString& what) {
+    // Only ever moves forward: a late "delivered" must not undo "read".
+    const QString now = receipts_.value(peer);
+    if (what == QStringLiteral("read")) {
+        if (!now.isEmpty()) {
+            setReceipt(peer, QStringLiteral("Read"));
+        }
+    } else if (what == QStringLiteral("delivered")) {
+        if (now != QStringLiteral("Read") && !now.isEmpty()) {
+            setReceipt(peer, QStringLiteral("Delivered"));
+        }
+    } else if (what == QStringLiteral("queued")) {
+        setReceipt(peer, peer + QStringLiteral(" is away and will get this when back"));
+    }
+}
+
 void ChatController::onDirect(const QString& from, const QString& text) {
     addRow(from, MessageModel::Incoming, from, text, true);
+    setReceipt(from, QString());  // the latest message here is no longer ours
+    owes_read_.insert(from);
+    if (from == current_ && window_active_) {
+        markSeen(from);
+    }
     const bool unseen = from != current_ || !window_active_;
     list_->touch(from, text, QDateTime::currentDateTime(), unseen);
     emit messageArrived(from);
@@ -1003,6 +1049,9 @@ bool ChatController::send(const QString& text) {
         return false;
     }
     last_target_ = current_;
+    if (!current_.isEmpty() && !current_.startsWith(QLatin1Char('#'))) {
+        setReceipt(current_, QStringLiteral("Sent"));
+    }
     addRow(current_, MessageModel::Outgoing, my_name_, text, true);
     list_->touch(current_, QStringLiteral("You: ") + text, QDateTime::currentDateTime(), false);
     emit sessionChanged();
@@ -1049,6 +1098,9 @@ void ChatController::signOut() {
     last_target_.clear();
     rooms_.clear();
     pending_room_.clear();
+    receipts_.clear();
+    owes_read_.clear();
+    emit receiptChanged();
     history_loaded_ = false;
     disconnect_reason_.clear();
     needs_sign_in_ = false;

@@ -225,6 +225,44 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(downloads.path() + "/notes (1).bin"), kWait);
     }
 
+    void receipts_and_away_messages() {
+        ChatController gina;
+        auto hugo = std::make_unique<ChatController>();
+        gina.signIn("127.0.0.1", SecureComm::DEFAULT_PORT, "gina");
+        hugo->signIn("127.0.0.1", SecureComm::DEFAULT_PORT, "hugo");
+        QTRY_COMPARE_WITH_TIMEOUT(gina.state(), ChatController::Online, kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(hugo->state(), ChatController::Online, kWait);
+
+        gina.setCurrentConversation("hugo");
+        QVERIFY(gina.receipt().isEmpty());
+        QVERIFY(gina.send("are you there?"));
+        QTRY_COMPARE_WITH_TIMEOUT(gina.receipt(), QStringLiteral("Delivered"), kWait);
+        // Read only once hugo actually opens the conversation.
+        QTest::qWait(300);
+        QCOMPARE(gina.receipt(), QStringLiteral("Delivered"));
+        hugo->setCurrentConversation("gina");
+        QTRY_COMPARE_WITH_TIMEOUT(gina.receipt(), QStringLiteral("Read"), kWait);
+
+        // A reply makes the latest message hugo's, so there is nothing to show.
+        QVERIFY(hugo->send("yes"));
+        QTRY_VERIFY_WITH_TIMEOUT(gina.receipt().isEmpty(), kWait);
+
+        // Hugo leaves: a message is kept, and he gets it when he signs in again.
+        hugo.reset();
+        QTRY_VERIFY_WITH_TIMEOUT(!gina.onlineNames().contains("hugo"), kWait);
+        QVERIFY(gina.send("read this later"));
+        QTRY_VERIFY_WITH_TIMEOUT(gina.receipt().contains("away"), kWait);
+
+        ChatController again;
+        again.signIn("127.0.0.1", SecureComm::DEFAULT_PORT, "hugo");
+        QTRY_COMPARE_WITH_TIMEOUT(again.state(), ChatController::Online, kWait);
+        again.setCurrentConversation("gina");
+        MessageModel* shown = again.messages();
+        QTRY_VERIFY_WITH_TIMEOUT(shown->count() > 0 &&
+                                 shown->entryAt(shown->count() - 1).text == QStringLiteral("read this later"), kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(gina.receipt(), QStringLiteral("Read"), kWait);
+    }
+
     void taken_name_reports_name_error() {
         ChatController other;
         other.signIn("127.0.0.1", SecureComm::DEFAULT_PORT, "bob");
