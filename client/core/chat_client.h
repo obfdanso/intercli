@@ -183,6 +183,7 @@ private:
         uint32_t total = 0;
         uint32_t next = 1;
         std::vector<uint8_t> data;
+        std::chrono::steady_clock::time_point last_piece;
     };
     std::map<std::string, IncomingFile> incoming_files_;
 

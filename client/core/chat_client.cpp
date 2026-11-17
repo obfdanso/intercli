@@ -510,6 +510,8 @@ uint32_t pieces_for(uint64_t size) {
 // Unfinished files kept at once: a couple per sender, and a few senders.
 constexpr size_t kMaxIncomingFiles = 8;
 constexpr size_t kMaxIncomingFilesPerSender = 2;
+// A file with no new piece for this long is given up on.
+constexpr std::chrono::seconds kIncomingFileIdle(60);
 
 } // namespace
 
@@ -578,6 +580,11 @@ void ChatClient::handle_file_chunk(const ChatMessage& msg, const std::string& fr
         // A sender's new file can push out only that sender's own unfinished
         // ones, never somebody else's; and when every slot is taken by other
         // people's files, the new one is not started.
+        // First, files whose sender stopped part-way stop holding a slot.
+        const auto now = std::chrono::steady_clock::now();
+        for (auto it = incoming_files_.begin(); it != incoming_files_.end();) {
+            it = now - it->second.last_piece > kIncomingFileIdle ? incoming_files_.erase(it) : std::next(it);
+        }
         if (incoming_files_.count(key) == 0) {
             const std::string prefix = key.substr(0, from.size() + 1);
             size_t from_sender = 0;
@@ -595,7 +602,8 @@ void ChatClient::handle_file_chunk(const ChatMessage& msg, const std::string& fr
                 return;
             }
         }
-        file.data.reserve(static_cast<size_t>(file.size));
+        // Memory is taken as the pieces arrive, not for the size claimed here.
+        file.last_piece = now;
         incoming_files_[key] = std::move(file);
     } else {
         const auto it = incoming_files_.find(key);
@@ -609,6 +617,7 @@ void ChatClient::handle_file_chunk(const ChatMessage& msg, const std::string& fr
             return;
         }
         file.data.insert(file.data.end(), body.begin() + FILE_CHUNK_HEADER, body.end());
+        file.last_piece = std::chrono::steady_clock::now();
         ++file.next;
     }
 
