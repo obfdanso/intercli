@@ -51,12 +51,18 @@ public:
 
     ~FrameProxy() {
         stop_ = true;
+        // Shut down first: on Linux, closing a socket does not wake a thread
+        // blocked in accept or recv on it, so the joins below would wait forever.
+        // (Windows wakes accept only on close, hence the listener's close here.)
+        shutdown_sock(listener_);
         close_sock(listener_);
-        close_sock(client_);
-        close_sock(server_);
+        shutdown_sock(client_);
+        shutdown_sock(server_);
         if (accept_thread_.joinable()) accept_thread_.join();
         if (up_.joinable()) up_.join();
         if (down_.joinable()) down_.join();
+        close_sock(client_);
+        close_sock(server_);
 #ifdef _WIN32
         WSACleanup();
 #endif
@@ -92,6 +98,14 @@ public:
     }
 
 private:
+    static void shutdown_sock(sock s) {
+#ifdef _WIN32
+        if (s != INVALID_SOCKET) shutdown(s, SD_BOTH);
+#else
+        if (s >= 0) shutdown(s, SHUT_RDWR);
+#endif
+    }
+
     static void close_sock(sock s) {
 #ifdef _WIN32
         if (s != INVALID_SOCKET) closesocket(s);
