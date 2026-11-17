@@ -836,18 +836,9 @@ void ChatController::onFile(const QString& from, SecureComm::FileTarget target, 
     const QString conversation = target == SecureComm::FileTarget::Direct ? from
                                : target == SecureComm::FileTarget::Room   ? QLatin1Char('#') + room
                                                                           : QString();
-    // The name is the sender's choice: keep only a plain file name, so nothing
-    // can be written outside the downloads folder or over an existing file.
-    QString safe = name.section(QLatin1Char('/'), -1).section(QLatin1Char('\\'), -1);
-    for (QChar& c : safe) {
-        if (c.unicode() < 0x20 || QStringLiteral(":*?\"<>|").contains(c)) {
-            c = QLatin1Char('_');
-        }
-    }
-    safe = safe.trimmed();
-    if (safe.isEmpty() || safe == QStringLiteral(".") || safe == QStringLiteral("..")) {
-        safe = QStringLiteral("file");
-    }
+    // The name is the sender's choice: cleaned so that nothing can be written
+    // outside the downloads folder, to a Windows device, or over an existing file.
+    const QString safe = qs(SecureComm::safe_file_name(ss(name)));
     const QString dir = download_dir_.isEmpty()
         ? QStandardPaths::writableLocation(QStandardPaths::DownloadLocation) + QStringLiteral("/intercli")
         : download_dir_;
@@ -859,7 +850,8 @@ void ChatController::onFile(const QString& from, SecureComm::FileTarget target, 
                (wanted.suffix().isEmpty() ? QString() : QLatin1Char('.') + wanted.suffix());
     }
     QFile out(path);
-    const bool saved = !QFileInfo::exists(path) && out.open(QIODevice::WriteOnly) && out.write(data) == data.size();
+    // NewOnly: created only if nothing is there, even if it appeared just now.
+    const bool saved = out.open(QIODevice::WriteOnly | QIODevice::NewOnly) && out.write(data) == data.size();
     out.close();
 
     const QString label = fileLabel(safe, data.size());
