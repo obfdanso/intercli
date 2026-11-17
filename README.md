@@ -371,6 +371,14 @@ inside the same encrypted channel as messages, so the host relays them like any 
 A received file is only ever saved, never run. Treat files from people you don't know as
 you would an email attachment.
 
+### Away messages and receipts
+
+A direct message to someone who has left the chat is kept by the host and handed over
+when they join again under the same name (up to 50 per person, for up to a day, and only
+while the chat keeps running). Under your latest direct message the app shows whether it
+was delivered, read, or is being kept for someone who is away. See `TODO.md` for the
+limits, the main one being that names aren't accounts.
+
 ### Host controls (desktop app)
 
 With someone's conversation open, the host's details panel can:
