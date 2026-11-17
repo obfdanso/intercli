@@ -47,7 +47,9 @@ int main() {
             }
             check(refused, "a short public key is refused");
             check(pair_safety_code(a_pub, b_pub) == pair_safety_code(b_pub, a_pub) &&
-                  pair_safety_code(a_pub, b_pub).size() == 24, "the pair's safety code is the same both ways");
+                  pair_safety_code(a_pub, b_pub).size() == 71, "the pair's safety code is the same both ways");
+            check(pair_safety_code(a_pub, b_pub) != pair_safety_code(a_pub, x25519_public_from_private(c)),
+                  "another pair has another code");
         }
 
         std::cout << "Identity keys" << std::endl;

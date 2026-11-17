@@ -77,7 +77,8 @@ std::vector<uint8_t> x25519_public_from_private(const std::vector<uint8_t>& priv
 // degenerate one.
 std::vector<uint8_t> e2e_shared_key(const std::vector<uint8_t>& my_private,
                                     const std::vector<uint8_t>& their_public);
-// One code for a pair of people to compare: the same whoever computes it.
+// 60 digits for a pair of people to compare (30 from each key): the same
+// whoever computes it.
 std::string pair_safety_code(const std::vector<uint8_t>& public_a, const std::vector<uint8_t>& public_b);
 
 // Main cryptographic manager class

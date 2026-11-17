@@ -404,11 +404,31 @@ std::vector<uint8_t> e2e_shared_key(const std::vector<uint8_t>& my_private,
     return key;
 }
 
+// 30 digits (about 100 bits) from a hash of one key, in groups of five.
+static std::string key_digits(const std::vector<uint8_t>& public_raw) {
+    unsigned char digest[EVP_MAX_MD_SIZE];
+    unsigned int len = 0;
+    EVP_Digest(public_raw.data(), public_raw.size(), digest, &len, EVP_sha256(), nullptr);
+    std::string out;
+    for (int group = 0; group < 6; ++group) {
+        uint64_t value = 0;
+        for (int i = 0; i < 5; ++i) {
+            value = (value << 8) | digest[group * 5 + i];
+        }
+        char buf[8];
+        std::snprintf(buf, sizeof(buf), "%05u", static_cast<unsigned>(value % 100000));
+        out += out.empty() ? "" : " ";
+        out += buf;
+    }
+    return out;
+}
+
+// Each person's key gives its own half, lower key first. Someone in the
+// middle would have to match a half exactly: a single short code over both
+// keys could be searched for much more cheaply.
 std::string pair_safety_code(const std::vector<uint8_t>& public_a, const std::vector<uint8_t>& public_b) {
-    std::vector<uint8_t> both = public_a < public_b ? public_a : public_b;
-    const std::vector<uint8_t>& second = public_a < public_b ? public_b : public_a;
-    both.insert(both.end(), second.begin(), second.end());
-    return safety_code(both);
+    const bool a_first = public_a < public_b;
+    return key_digits(a_first ? public_a : public_b) + " " + key_digits(a_first ? public_b : public_a);
 }
 
 std::vector<uint8_t> CryptoManager::perform_dh_key_exchange(const std::vector<uint8_t>& private_key,
