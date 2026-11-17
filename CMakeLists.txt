@@ -212,6 +212,18 @@ if(WIN32)
     endif()
 endif()
 
+# Fuzzing the parsers (clang only):
+#   cmake -B build-fuzz -DINTERCLI_FUZZ=ON -DCMAKE_CXX_COMPILER=clang++
+#   cmake --build build-fuzz --target fuzz_parsers && build-fuzz/fuzz_parsers -max_total_time=60
+option(INTERCLI_FUZZ "Build the libFuzzer target for the parsers (needs clang)" OFF)
+if(INTERCLI_FUZZ)
+    add_executable(fuzz_parsers tests/fuzz_parsers.cpp)
+    target_include_directories(fuzz_parsers PRIVATE crypto)
+    target_link_libraries(fuzz_parsers intercli_client_core)
+    target_compile_options(fuzz_parsers PRIVATE -g -O1 -fsanitize=fuzzer,address,undefined)
+    target_link_options(fuzz_parsers PRIVATE -fsanitize=fuzzer,address,undefined)
+endif()
+
 # What goes into an installed copy or a package: the programs, the libraries
 # they need to start, and the readme. Everything sits in one folder on
 # Windows; elsewhere the programs go in bin.
