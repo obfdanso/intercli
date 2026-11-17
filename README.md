@@ -342,7 +342,8 @@ Older (version 1) clients or servers are refused with a message asking to update
   the name (so names can't be probed without the code), compared in constant time.
 - Each wrong code waits a second; five on one connection close it; ten from one
   address lock that address out (for a minute, doubling each time, up to an hour).
-  An address can have at most 8 connections that haven't joined.
+  An address can have at most 8 connections that haven't joined, and a connection
+  that hasn't picked a name within five minutes is closed.
 - The host can make a new code at any time from the details panel; it applies to people
   who join from then on.
 
@@ -365,12 +366,14 @@ Names (of people and rooms) can no longer start with `#`.
 Files of up to 8 MB can be sent to a person, a room or everyone. They travel in pieces
 inside the same encrypted channel as messages, so the host relays them like any message.
 
-- **Desktop app:** drag a file onto the conversation. Received files are saved to
+- **Desktop app:** click **+** next to the message box, or drag files onto the
+  conversation. Received files are saved to
   `Downloads/intercli` (never over an existing file) and shown in the conversation;
   pictures are previewed and open when clicked; clicking any other file shows it in
   its folder rather than opening it.
 - **Terminal client:** `/send @name path`, `/send #room path` or `/send all path`.
-  Received files are saved to an `intercli-downloads` folder where the client was started.
+  Received files are saved to an `intercli-downloads` folder where the client was started
+  (never over an existing file), and on Windows marked as downloaded, as the app does.
 
 A received file is only ever saved, never run. Treat files from people you don't know as
 you would an email attachment.
@@ -401,7 +404,7 @@ A message carries a number that only goes up, so an old one cannot be delivered 
 
 A direct message to someone who has left the chat is kept by the host and handed over
 when they join again under the same name from the same address (up to 50 per person, for up to a day, and only
-while the chat keeps running). Under your latest direct message the app shows whether it
+while the chat keeps running). A kept message shows the time it was written. Under your latest direct message the app shows whether it
 was delivered, read, or is being kept for someone who is away. See `TODO.md` for the
 limits, the main one being that names aren't accounts.
 
@@ -411,7 +414,8 @@ With someone's conversation open, the host's details panel can:
 
 - **Remove** them: they are told the host removed them and disconnected, and can join again.
 - **Ban** them: the same, but their name and their address (unless it is the host's own
-  PC) are refused until the host ends the chat. Bans are not kept between sessions.
+  PC) are refused. Bans are kept on the host's PC and last every time it hosts, until
+  the host clicks **Clear Bans**.
 
 ### Finding chats nearby
 
@@ -420,6 +424,8 @@ With someone's conversation open, the host's details panel can:
   queries are larger than answers so they can't be used to amplify traffic.
 - The list ignores malformed answers, keeps a chat at the address it was first heard
   from, and is capped in size.
+- If another program holds port 8081, hosting still works, but the chat can't show
+  under "Chats nearby"; the host is told so, and others can join by address.
 
 ### Limits
 
