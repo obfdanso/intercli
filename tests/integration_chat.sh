@@ -44,7 +44,11 @@ check_absent() {
 SERVER_PID=""
 cleanup() {
     # Stop only the server this test started, never other processes on the machine.
-    [ -n "$SERVER_PID" ] && kill "$SERVER_PID" >/dev/null 2>&1
+    # Wait for it to be gone, so the next test finds the port free.
+    if [ -n "$SERVER_PID" ]; then
+        kill "$SERVER_PID" >/dev/null 2>&1
+        wait "$SERVER_PID" 2>/dev/null
+    fi
     rm -rf "$WORK"
 }
 trap cleanup EXIT

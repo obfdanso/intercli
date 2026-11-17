@@ -14,6 +14,8 @@ SERVER_PID=$!
 cleanup() {
     # Stop only the server this script started.
     kill "$SERVER_PID" >/dev/null 2>&1
+    # Wait for it to be gone, so the next test finds the port free.
+    wait "$SERVER_PID" 2>/dev/null
     rm -rf "$WORK"
 }
 trap cleanup EXIT
