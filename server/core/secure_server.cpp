@@ -1061,8 +1061,10 @@ struct SecureServer::Impl {
                             LogLine(this, false) << "Registered " << wanted << " on session "
                                       << session.session_id;
                             broadcast_presence(wanted, true, wanted);
-                            remember_name(wanted);
+                            // In this order: what was kept is checked against the
+                            // address the name had before this join.
                             deliver_kept(conn);
+                            remember_name(wanted, conn->peer);
                         }
                         continue;
                     }
@@ -1308,15 +1310,15 @@ struct SecureServer::Impl {
         std::chrono::steady_clock::time_point when;
     };
     std::map<std::string, std::deque<Kept>> kept_;
-    std::set<std::string> seen_names_;
+    std::map<std::string, std::string> seen_names_;  // name -> the address it last joined from
     std::mutex kept_mutex_;
     static constexpr size_t kMaxKeptPerPerson = 50;
     static constexpr size_t kMaxSeenNames = 1024;
 
-    void remember_name(const std::string& name) {
+    void remember_name(const std::string& name, const std::string& address) {
         std::lock_guard<std::mutex> lock(kept_mutex_);
-        if (seen_names_.size() < kMaxSeenNames) {
-            seen_names_.insert(name);
+        if (seen_names_.count(name) > 0 || seen_names_.size() < kMaxSeenNames) {
+            seen_names_[name] = address;
         }
     }
 
@@ -1346,6 +1348,15 @@ struct SecureServer::Impl {
             }
             queue = std::move(it->second);
             kept_.erase(it);
+            // Names aren't accounts, so anyone could take the name of someone
+            // who left. What was kept goes only to the address that name was
+            // last at; from anywhere else it is thrown away, not handed over.
+            const auto owner = seen_names_.find(conn->name);
+            if (owner == seen_names_.end() || owner->second != conn->peer) {
+                LogLine(this, false) << "Dropped messages kept for " << conn->name
+                                     << ": the name came back from a different address";
+                return;
+            }
         }
         const auto now = std::chrono::steady_clock::now();
         while (!queue.empty() && now - queue.front().when > std::chrono::hours(24)) {
