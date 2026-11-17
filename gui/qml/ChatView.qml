@@ -139,7 +139,22 @@ Item {
             anchors.top: banner.bottom
             anchors.left: parent.left
             anchors.right: parent.right
+            anchors.bottom: receiptLine.top
+        }
+        // What became of our latest direct message: delivered, read, or kept
+        // for someone who is away.
+        Text {
+            id: receiptLine
+            textFormat: Text.PlainText
+            visible: Chat.receipt.length > 0
+            anchors.right: parent.right
+            anchors.rightMargin: 22
             anchors.bottom: composer.top
+            height: visible ? implicitHeight + 2 : 0
+            text: Chat.receipt
+            color: Theme.textTertiary
+            font.pixelSize: 11
+            Accessible.name: text
         }
 
         Composer {
