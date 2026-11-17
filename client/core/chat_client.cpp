@@ -507,7 +507,9 @@ uint32_t pieces_for(uint64_t size) {
     return 1 + static_cast<uint32_t>((size + FILE_CHUNK_DATA - 1) / FILE_CHUNK_DATA);
 }
 
-constexpr size_t kMaxIncomingFiles = 4;
+// Unfinished files kept at once: a couple per sender, and a few senders.
+constexpr size_t kMaxIncomingFiles = 8;
+constexpr size_t kMaxIncomingFilesPerSender = 2;
 
 } // namespace
 
@@ -573,9 +575,25 @@ void ChatClient::handle_file_chunk(const ChatMessage& msg, const std::string& fr
         if (kind == 'r') {
             file.room = get_chat_field(msg.recipient, MAX_NAME_LEN);
         }
-        // Abandoned transfers must not hold the few slots for ever.
-        if (incoming_files_.size() >= kMaxIncomingFiles && incoming_files_.count(key) == 0) {
-            incoming_files_.erase(incoming_files_.begin());
+        // A sender's new file can push out only that sender's own unfinished
+        // ones, never somebody else's; and when every slot is taken by other
+        // people's files, the new one is not started.
+        if (incoming_files_.count(key) == 0) {
+            const std::string prefix = key.substr(0, from.size() + 1);
+            size_t from_sender = 0;
+            auto oldest = incoming_files_.end();
+            for (auto it = incoming_files_.begin(); it != incoming_files_.end(); ++it) {
+                if (it->first.compare(0, prefix.size(), prefix) == 0) {
+                    if (from_sender++ == 0) {
+                        oldest = it;
+                    }
+                }
+            }
+            if (from_sender >= kMaxIncomingFilesPerSender) {
+                incoming_files_.erase(oldest);
+            } else if (incoming_files_.size() >= kMaxIncomingFiles) {
+                return;
+            }
         }
         file.data.reserve(static_cast<size_t>(file.size));
         incoming_files_[key] = std::move(file);
