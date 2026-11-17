@@ -7,6 +7,7 @@
 #include <random>
 #include <algorithm>
 #include <cstring>
+#include <openssl/kdf.h>
 
 namespace SecureComm {
 
@@ -328,6 +329,86 @@ std::string normalize_room_code(const std::string& code) {
 std::string format_room_code(const std::string& code) {
     const std::string n = normalize_room_code(code);
     return n.size() == 6 ? n.substr(0, 3) + "-" + n.substr(3) : n;
+}
+
+std::vector<uint8_t> x25519_generate_private() {
+    EVP_PKEY* key = nullptr;
+    EVP_PKEY_CTX* ctx = EVP_PKEY_CTX_new_id(EVP_PKEY_X25519, nullptr);
+    const bool made = ctx != nullptr && EVP_PKEY_keygen_init(ctx) > 0 && EVP_PKEY_keygen(ctx, &key) > 0;
+    EVP_PKEY_CTX_free(ctx);
+    std::vector<uint8_t> raw(32);
+    size_t len = raw.size();
+    const bool ok = made && EVP_PKEY_get_raw_private_key(key, raw.data(), &len) > 0 && len == 32;
+    EVP_PKEY_free(key);
+    if (!ok) {
+        throw std::runtime_error("Could not create an X25519 key");
+    }
+    return raw;
+}
+
+std::vector<uint8_t> x25519_public_from_private(const std::vector<uint8_t>& private_raw) {
+    if (private_raw.size() != 32) {
+        throw std::runtime_error("An X25519 key must be 32 bytes");
+    }
+    EVP_PKEY* key = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, nullptr, private_raw.data(), 32);
+    std::vector<uint8_t> raw(32);
+    size_t len = raw.size();
+    const bool ok = key != nullptr && EVP_PKEY_get_raw_public_key(key, raw.data(), &len) > 0 && len == 32;
+    EVP_PKEY_free(key);
+    if (!ok) {
+        throw std::runtime_error("Bad X25519 key");
+    }
+    return raw;
+}
+
+std::vector<uint8_t> e2e_shared_key(const std::vector<uint8_t>& my_private,
+                                    const std::vector<uint8_t>& their_public) {
+    if (my_private.size() != 32 || their_public.size() != 32) {
+        throw std::runtime_error("An X25519 key must be 32 bytes");
+    }
+    const std::vector<uint8_t> my_public = x25519_public_from_private(my_private);
+    EVP_PKEY* mine = EVP_PKEY_new_raw_private_key(EVP_PKEY_X25519, nullptr, my_private.data(), 32);
+    EVP_PKEY* theirs = EVP_PKEY_new_raw_public_key(EVP_PKEY_X25519, nullptr, their_public.data(), 32);
+    EVP_PKEY_CTX* ctx = mine != nullptr && theirs != nullptr ? EVP_PKEY_CTX_new(mine, nullptr) : nullptr;
+    std::vector<uint8_t> secret(32);
+    size_t len = secret.size();
+    // OpenSSL refuses a peer key that would give an all-zero secret.
+    bool ok = ctx != nullptr && EVP_PKEY_derive_init(ctx) > 0 && EVP_PKEY_derive_set_peer(ctx, theirs) > 0 &&
+              EVP_PKEY_derive(ctx, secret.data(), &len) > 0 && len == 32;
+    EVP_PKEY_CTX_free(ctx);
+    EVP_PKEY_free(mine);
+    EVP_PKEY_free(theirs);
+
+    // Both public keys go into the key, lower one first so both sides agree.
+    std::string info = "intercli e2e v1";
+    const bool mine_first = my_public < their_public;
+    const std::vector<uint8_t>& first = mine_first ? my_public : their_public;
+    const std::vector<uint8_t>& second = mine_first ? their_public : my_public;
+    info.append(first.begin(), first.end());
+    info.append(second.begin(), second.end());
+
+    std::vector<uint8_t> key(KEY_SIZE);
+    size_t key_len = key.size();
+    EVP_PKEY_CTX* kdf = ok ? EVP_PKEY_CTX_new_id(EVP_PKEY_HKDF, nullptr) : nullptr;
+    ok = kdf != nullptr && EVP_PKEY_derive_init(kdf) > 0 &&
+         EVP_PKEY_CTX_set_hkdf_md(kdf, EVP_sha256()) > 0 &&
+         EVP_PKEY_CTX_set1_hkdf_key(kdf, secret.data(), static_cast<int>(secret.size())) > 0 &&
+         EVP_PKEY_CTX_add1_hkdf_info(kdf, reinterpret_cast<const unsigned char*>(info.data()),
+                                     static_cast<int>(info.size())) > 0 &&
+         EVP_PKEY_derive(kdf, key.data(), &key_len) > 0 && key_len == KEY_SIZE;
+    EVP_PKEY_CTX_free(kdf);
+    OPENSSL_cleanse(secret.data(), secret.size());
+    if (!ok) {
+        throw std::runtime_error("Could not agree on a key");
+    }
+    return key;
+}
+
+std::string pair_safety_code(const std::vector<uint8_t>& public_a, const std::vector<uint8_t>& public_b) {
+    std::vector<uint8_t> both = public_a < public_b ? public_a : public_b;
+    const std::vector<uint8_t>& second = public_a < public_b ? public_b : public_a;
+    both.insert(both.end(), second.begin(), second.end());
+    return safety_code(both);
 }
 
 std::vector<uint8_t> CryptoManager::perform_dh_key_exchange(const std::vector<uint8_t>& private_key,

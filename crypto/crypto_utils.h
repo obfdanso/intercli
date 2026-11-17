@@ -68,6 +68,18 @@ std::string normalize_room_code(const std::string& code);
 // "K7P29Q" -> "K7P-29Q".
 std::string format_room_code(const std::string& code);
 
+// End-to-end encryption between two people: each has a long-term X25519 key
+// (raw, 32 bytes), and the pair share one AES-256 key that the server, which
+// only ever sees the public halves, cannot work out.
+std::vector<uint8_t> x25519_generate_private();
+std::vector<uint8_t> x25519_public_from_private(const std::vector<uint8_t>& private_raw);
+// The same key on both sides. Throws on a key of the wrong size or a
+// degenerate one.
+std::vector<uint8_t> e2e_shared_key(const std::vector<uint8_t>& my_private,
+                                    const std::vector<uint8_t>& their_public);
+// One code for a pair of people to compare: the same whoever computes it.
+std::string pair_safety_code(const std::vector<uint8_t>& public_a, const std::vector<uint8_t>& public_b);
+
 // Main cryptographic manager class
 class CryptoManager {
 public:
