@@ -645,9 +645,13 @@ static void end_to_end_tests() {
           "the kept message cannot be read with another key");
     check(!eve_ears.heard("direct:ann:for ben only"), "so it is never shown");
 
-    a.send_direct("ben", "who are you");
+    a.send_direct("ben", "ben, it's me");
     check(a_ears.wait("key:ben:changed"), "the sender is warned that ben's key is different");
-    check(eve_ears.wait("direct:ann:who are you"), "messages written after that go to the new holder");
+    check(a_ears.wait("notice:Not sent: ben has a different key than last time. "
+                      "Check the safety code with them, then send again."), "and told the message was held back");
+    a.send_direct("ben", "who are you");
+    check(eve_ears.wait("direct:ann:who are you"), "sending again after the warning goes to the new holder");
+    check(!eve_ears.heard("direct:ann:ben, it's me"), "the held message was never sent");
 }
 
 int main() {
