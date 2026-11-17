@@ -10,6 +10,7 @@
 #include "discovery.h"
 #include "../../tests/silent_server.h"
 
+#include <QUdpSocket>
 #include <QElapsedTimer>
 #include <QSettings>
 #include <QTemporaryDir>
@@ -503,6 +504,25 @@ private slots:
     }
 
     // --- hosting and joining nearby chats ---------------------------------
+
+    void host_warns_when_not_found_nearby() {
+        constexpr quint16 discovery = 18085;
+        QUdpSocket blocker;
+        QVERIFY(blocker.bind(QHostAddress::AnyIPv4, discovery, QUdpSocket::DontShareAddress));
+        QTemporaryDir hostData;
+        HostSession hosting(hostData.path());
+        ChatController host(nullptr, &hosting, discovery);
+        host.hostChat("hugo");
+        QTRY_COMPARE_WITH_TIMEOUT(host.state(), ChatController::Online, kWait);
+        host.setCurrentConversation(QString());
+        MessageModel* shown = host.messages();
+        bool warned = false;
+        for (int i = 0; i < shown->count(); ++i) {
+            warned = warned || shown->entryAt(i).text.contains("Chats nearby");
+        }
+        QVERIFY(warned);
+        host.endChat();
+    }
 
     void host_join_code_pin_and_end() {
         constexpr quint16 discovery = 18084;

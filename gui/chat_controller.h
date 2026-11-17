@@ -270,6 +270,7 @@ private:
     class HostSession* host_session_ = nullptr;
     ChatFinder* finder_ = nullptr;
     bool hosting_ = false;
+    bool discovery_note_due_ = false;  // hosting, but others can't find the chat nearby
     quint16 discovery_port_ = kDiscoveryPort;
     bool public_network_ = false;
     QString chat_id_;      // set for chats joined from the list or hosted here

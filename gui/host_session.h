@@ -36,6 +36,9 @@ public:
     QString roomCode() const { return room_code_; }  // normalised, 6 characters
     QString chatName() const { return chat_name_; }
     quint16 port() const { return port_; }
+    // False while hosting if the discovery port couldn't be used: the chat
+    // works, but doesn't show under "Chats nearby" on other PCs.
+    bool discoverable() const { return discoverable_; }
     int people() const { return people_; }
     // Asks the server right now (people() is refreshed every couple of seconds).
     int peopleNow() const;
@@ -67,6 +70,7 @@ private:
     QByteArray identity_public_;
     quint16 port_ = 0;
     int people_ = 0;
+    bool discoverable_ = false;
 
     std::unique_ptr<SecureComm::SecureServer> server_;
     std::thread runner_;

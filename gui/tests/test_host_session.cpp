@@ -11,6 +11,7 @@
 #include <QSettings>
 #include <QSignalSpy>
 #include <QTemporaryDir>
+#include <QUdpSocket>
 #include <QtTest>
 
 #include <condition_variable>
@@ -55,6 +56,25 @@ private slots:
     void initTestCase() {
         QSettings::setDefaultFormat(QSettings::IniFormat);
         QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, settingsDir.path());
+    }
+
+    void says_when_it_cannot_be_found() {
+        HostSession host(dataDir.path());
+        QSignalSpy started(&host, &HostSession::started);
+        host.start(QStringLiteral("Danso"), kDiscovery);
+        QTRY_COMPARE_WITH_TIMEOUT(started.count(), 1, 5000);
+        QVERIFY(host.discoverable());
+        host.stop();
+        QVERIFY(!host.discoverable());
+
+        // Something else holds the discovery port for itself.
+        QUdpSocket blocker;
+        QVERIFY(blocker.bind(QHostAddress::AnyIPv4, kDiscovery, QUdpSocket::DontShareAddress));
+        host.start(QStringLiteral("Danso"), kDiscovery);
+        QTRY_COMPARE_WITH_TIMEOUT(started.count(), 2, 5000);
+        QVERIFY(host.running());
+        QVERIFY(!host.discoverable());
+        host.stop();
     }
 
     void hosts_on_the_next_free_port() {

@@ -93,7 +93,7 @@ void HostSession::start(const QString& hostName, quint16 discoveryPort) {
     // The accept loop blocks, so it gets its own thread; binding happened above.
     runner_ = std::thread([server = server_.get()] { server->run(); });
 
-    beacon_.start(discoveryPort);
+    discoverable_ = beacon_.start(discoveryPort);
     people_ = 0;
     announce();
     people_timer_.start();
@@ -111,6 +111,7 @@ void HostSession::stop() {
     }
     server_.reset();
     port_ = 0;
+    discoverable_ = false;
     if (people_ != 0) {
         people_ = 0;
         emit peopleChanged();

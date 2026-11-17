@@ -381,6 +381,7 @@ void ChatController::onHostStarted(quint16 port) {
     chat_id_ = host_session_->chatId();
     room_code_ = host_session_->roomCode();
     announced_identity_ = host_session_->identityPublic();
+    discovery_note_due_ = !host_session_->discoverable();
     // We know our own identity, so it is pinned from the start.
     QSettings().setValue("identities/chat:" + chat_id_, host_session_->identityPublic().toHex());
     emit hostingChanged();
@@ -528,6 +529,14 @@ void ChatController::onRegistered(const QString& name) {
         loadSavedHistory();
     }
     setState(Online);
+    if (discovery_note_due_ && hosting_) {
+        discovery_note_due_ = false;
+        addRow(QString(), MessageModel::System, QString(),
+               QStringLiteral("This chat won't show under \"Chats nearby\" on other PCs: another program is "
+                              "using the discovery port (%1). Others can still join by typing this PC's address.")
+                   .arg(discovery_port_),
+               false);
+    }
     if (client_) {
         client_->request_roster();
         // Back into our rooms: the ones from before a reconnect, and the ones
