@@ -333,6 +333,10 @@ static ChatEvents listen(Ears& ears) {
         ears.add(std::string("file:") + from + ":" + kind + ":" + room + ":" + name + ":" +
                  std::to_string(data.size()) + ":" + std::to_string(sum));
     };
+    ev.on_direct = [&ears](const std::string& from, const std::string& t) { ears.add("direct:" + from + ":" + t); };
+    ev.on_receipt = [&ears](const std::string& peer, const std::string& what) {
+        ears.add("receipt:" + peer + ":" + what);
+    };
     ev.on_room_list = [&ears](const std::vector<std::string>& rooms) {
         std::string all;
         for (const auto& r : rooms) all += (all.empty() ? "" : ",") + r;
@@ -514,6 +518,57 @@ static void file_tests() {
     check(b_ears.wait("room:dev:ann:still here"), "the connection is fine afterwards");
 }
 
+static void receipt_tests() {
+    ServerOptions options;
+    options.port = 18134;
+    Running server(options);
+    check(server.ok, "a server starts");
+
+    Ears a_ears, b_ears;
+    ChatClient a(listen(a_ears));
+    auto b = std::make_unique<ChatClient>(listen(b_ears));
+    std::string error;
+    check(a.connect("127.0.0.1", 18134, &error) && b->connect("127.0.0.1", 18134, &error), "two clients connect");
+    a.request_name("ann");
+    b->request_name("ben");
+    check(a_ears.wait("registered:ann") && b_ears.wait("registered:ben"), "both join");
+
+    a.send_direct("ben", "hello");
+    check(b_ears.wait("direct:ann:hello"), "a direct message arrives");
+    check(a_ears.wait("receipt:ben:delivered"), "the sender is told it was delivered");
+    b->send_read("ann");
+    check(a_ears.wait("receipt:ben:read"), "the sender is told it was read");
+
+    a.send_direct("ghost", "anyone?");
+    check(a_ears.wait("notice:No such user: ghost"), "a name never seen is still refused");
+
+    // Ben goes away; a message to him is kept and handed over when he is back.
+    b.reset();
+    check(a_ears.wait("presence:ben:left"), "ben leaves");
+    a.send_direct("ben", "see this later");
+    check(a_ears.wait("receipt:ben:queued"), "the sender is told it is kept for later");
+
+    Ears back_ears;
+    ChatClient back(listen(back_ears));
+    check(back.connect("127.0.0.1", 18134, &error), "ben reconnects");
+    back.request_name("ben");
+    check(back_ears.wait("registered:ben"), "and joins again");
+    check(back_ears.wait("notice:1 message arrived while you were away"), "he is told something was kept");
+    check(back_ears.wait("direct:ann:see this later"), "and gets it");
+
+    // Kept once, delivered once.
+    Ears third_ears;
+    back.disconnect();
+    check(a_ears.wait("presence:ben:left"), "ben leaves again");
+    ChatClient third(listen(third_ears));
+    check(third.connect("127.0.0.1", 18134, &error), "ben reconnects once more");
+    third.request_name("ben");
+    check(third_ears.wait("registered:ben"), "and joins");
+    a.send_direct("ben", "marker");
+    check(third_ears.wait("direct:ann:marker"), "new messages arrive");
+    check(!third_ears.heard("direct:ann:see this later"), "the kept message is not delivered twice");
+}
+
 int main() {
     const uint16_t port = 18090;
 
@@ -580,6 +635,9 @@ int main() {
 
     std::cout << "Files" << std::endl;
     file_tests();
+
+    std::cout << "Away messages and receipts" << std::endl;
+    receipt_tests();
 
     if (failures == 0) {
         std::cout << "All server core tests passed" << std::endl;
