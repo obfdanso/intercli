@@ -233,6 +233,31 @@ private slots:
         again.clearBans();
     }
 
+    void bans_from_the_old_format_are_kept() {
+        HostSession host(dataDir.path());
+        host.clearBans();
+        {
+            QSettings settings;
+            settings.setValue("host/bannedNames", QStringList({"old"}));
+            settings.setValue("host/bannedAddresses", QStringList({"10.0.0.9"}));
+        }
+        QCOMPARE(host.bannedNames(), QStringList({"old", "10.0.0.9"}));
+        QVERIFY(!QSettings().contains("host/bannedNames"));
+        QVERIFY(!QSettings().contains("host/bannedAddresses"));
+
+        QSignalSpy started(&host, &HostSession::started);
+        host.start(QStringLiteral("Danso"), kDiscovery);
+        QTRY_COMPARE_WITH_TIMEOUT(started.count(), 1, 5000);
+        Registration reg;
+        SecureComm::ChatClient client(reg.events());
+        std::string err;
+        QVERIFY(client.connect("127.0.0.1", host.port(), &err));
+        client.request_name("old", host.roomCode().toStdString());
+        QVERIFY(reg.wait().rfind("fail:", 0) == 0);
+        host.stop();
+        host.clearBans();
+    }
+
     void the_chat_shows_up_nearby_with_its_people() {
         HostSession host(dataDir.path());
         host.setPeoplePollForTests(200);

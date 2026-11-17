@@ -16,7 +16,36 @@ namespace {
 // Each ban is kept as "name<TAB>address" (address empty if none was banned).
 const char kBans[] = "host/bans";
 
+void saveBans(const std::vector<SecureComm::ServerOptions::Ban>& bans);
+
+// An earlier version kept names and addresses in two unpaired lists. They are
+// carried over (each address as its own entry, listed under the address) so
+// no ban is lost, and the old lists are removed once the new one is written.
+void migrateOldBans() {
+    QSettings settings;
+    const QStringList names = settings.value("host/bannedNames").toStringList();
+    const QStringList addresses = settings.value("host/bannedAddresses").toStringList();
+    if (names.isEmpty() && addresses.isEmpty()) {
+        return;
+    }
+    std::vector<SecureComm::ServerOptions::Ban> bans;
+    for (const QString& entry : settings.value(kBans).toStringList()) {
+        const QStringList parts = entry.split(QLatin1Char('\t'));
+        bans.push_back({parts.value(0).toStdString(), parts.value(1).toStdString()});
+    }
+    for (const QString& name : names) {
+        bans.push_back({name.toStdString(), std::string()});
+    }
+    for (const QString& address : addresses) {
+        bans.push_back({address.toStdString(), address.toStdString()});
+    }
+    saveBans(bans);
+    settings.remove("host/bannedNames");
+    settings.remove("host/bannedAddresses");
+}
+
 std::vector<SecureComm::ServerOptions::Ban> loadBans() {
+    migrateOldBans();
     std::vector<SecureComm::ServerOptions::Ban> out;
     for (const QString& entry : QSettings().value(kBans).toStringList()) {
         const QStringList parts = entry.split(QLatin1Char('	'));
