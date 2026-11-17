@@ -3,6 +3,7 @@
 #include "chat_client.h"
 #include "../crypto/crypto_utils.h"
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -111,26 +112,24 @@ private:
         };
         ev.on_file = [](const std::string& from, SecureComm::FileTarget, const std::string& room,
                         const std::string& name, const std::vector<uint8_t>& data) {
-            // The name is the sender's choice: keep only a plain file name, and
-            // never write over something that is already there.
-            std::string safe = std::filesystem::path(name).filename().string();
-            for (char& c : safe) {
-                if (static_cast<unsigned char>(c) < 0x20 || std::string("\\/:*?\"<>|").find(c) != std::string::npos) {
-                    c = '_';
-                }
-            }
-            if (safe.empty() || safe == "." || safe == "..") {
-                safe = "file";
-            }
+            // The name is the sender's choice, so it is cleaned first; and the
+            // file is created only if nothing by that name exists ("x"), so a
+            // received file can never replace one that is already there.
+            const std::string safe = SecureComm::safe_file_name(name);
             std::error_code ec;
             const std::filesystem::path dir = "intercli-downloads";
             std::filesystem::create_directories(dir, ec);
             std::filesystem::path target = dir / safe;
-            for (int n = 1; std::filesystem::exists(target, ec) && n < 1000; ++n) {
+            std::FILE* file = std::fopen(target.string().c_str(), "wbx");
+            for (int n = 1; !file && n < 1000; ++n) {
                 target = dir / (std::to_string(n) + "-" + safe);
+                file = std::fopen(target.string().c_str(), "wbx");
             }
-            std::ofstream out(target, std::ios::binary);
-            out.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+            bool out = false;
+            if (file) {
+                out = std::fwrite(data.data(), 1, data.size(), file) == data.size();
+                out = std::fclose(file) == 0 && out;
+            }
             const std::string where = room.empty() ? "" : " in #" + room;
             print_incoming(out ? "*** " + from + " sent a file" + where + ": saved as " + target.string() + " ***"
                                : "*** " + from + " sent a file" + where + ", but it could not be saved ***");
