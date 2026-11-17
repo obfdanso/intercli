@@ -392,8 +392,9 @@ A message carries a number that only goes up, so an old one cannot be delivered 
   a call: the details panel shows it in the app, `/verify name` in the terminal client. If
   both see the same digits, nobody is in between.
 - **When someone's key changes** (a new PC, a reinstall, or someone else using the name)
-  you are warned, and the message you were sending is held back. Check the safety code,
-  then send again if you trust it.
+  you are warned, and the next message or file you send them is held back, whether the
+  new key turned up on a message from them, on opening the chat, or as you sent. Check
+  the safety code, then send again if you trust it.
 - A direct message can be up to 956 bytes (the sealing takes some room); others 1024.
 
 ### Away messages and receipts

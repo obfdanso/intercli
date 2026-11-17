@@ -552,10 +552,39 @@ bool ChatClient::record_key(const std::string& name, const PeerKey& key) {
         }
     }
     const KeyStore::Seen seen = store_->remember(chat_scope(), name, key.pub);
+    if (seen == KeyStore::Seen::Changed) {
+        // Stays until something for them is held back, so a key that changed
+        // on a message coming in, or on a fetch ahead of time, is not
+        // trusted without the user hearing of it first.
+        std::lock_guard<std::mutex> lock(e2e_mutex_);
+        key_changed_.insert(name);
+    }
     if (events_.on_peer_key) {
         events_.on_peer_key(name, seen == KeyStore::Seen::Changed);
     }
     return seen == KeyStore::Seen::Changed;
+}
+
+namespace {
+std::string changed_key_notice(const std::string& name) {
+    return "Not sent: " + name + " has a different key than last time. "
+           "Check the safety code with them, then send again.";
+}
+} // namespace
+
+// True (with a notice) if name's key changed and the user has not been told
+// yet. Telling them is the hold-back: sending again goes.
+bool ChatClient::held_back(const std::string& name) {
+    {
+        std::lock_guard<std::mutex> lock(e2e_mutex_);
+        if (key_changed_.erase(name) == 0) {
+            return false;
+        }
+    }
+    if (events_.on_notice) {
+        events_.on_notice(changed_key_notice(name));
+    }
+    return true;
 }
 
 bool ChatClient::ask_key(const std::string& name) {
@@ -589,7 +618,6 @@ bool ChatClient::request_key(const std::string& peer) {
 bool ChatClient::wait_for_key(const std::string& name, PeerKey* out) {
     std::unique_lock<std::mutex> lock(e2e_mutex_);
     if (peer_keys_.count(name) == 0) {
-        key_changed_.erase(name);
         if (waiting_.count(name) == 0) {
             waiting_[name];
             lock.unlock();
@@ -601,11 +629,6 @@ bool ChatClient::wait_for_key(const std::string& name, PeerKey* out) {
         key_arrived_.wait_for(lock, kKeyWait, [&] {
             return peer_keys_.count(name) > 0 || waiting_.count(name) == 0;
         });
-        // A key that is not the one they had before: the user has been
-        // warned, and nothing goes out until they try again.
-        if (key_changed_.erase(name) > 0) {
-            return false;
-        }
     }
     const auto it = peer_keys_.find(name);
     if (it == peer_keys_.end()) {
@@ -624,10 +647,6 @@ void ChatClient::handle_key(const std::string& name, const std::string& key) {
     // someone in between). The user is warned through on_peer_key, and what
     // was waiting is not sent: sending again is how they say they trust it.
     const bool changed = ok && record_key(name, peer);
-    if (changed) {
-        std::lock_guard<std::mutex> lock(e2e_mutex_);
-        key_changed_.insert(name);
-    }
     // What was waiting goes out in the order it was written. The entry stays
     // until nothing is left, so a message sent meanwhile queues up behind.
     bool dropped = false;
@@ -653,13 +672,16 @@ void ChatClient::handle_key(const std::string& name, const std::string& key) {
             }
         }
     }
+    if (dropped && changed) {
+        // The notice below is the warning: sending again goes.
+        std::lock_guard<std::mutex> lock(e2e_mutex_);
+        key_changed_.erase(name);
+    }
     key_arrived_.notify_all();
     if (dropped && events_.on_notice) {
-        // The server knows no key for that name, so nobody by it has been
-        // here. Nothing is ever sent unsealed instead.
-        events_.on_notice(changed ? "Not sent: " + name + " has a different key than last time. "
-                                    "Check the safety code with them, then send again."
-                                  : "No such user: " + name);
+        // Without a key the server knows nobody by that name has been here.
+        // Nothing is ever sent unsealed instead.
+        events_.on_notice(changed ? changed_key_notice(name) : "No such user: " + name);
     }
 }
 
@@ -697,7 +719,7 @@ bool ChatClient::send_direct(const std::string& name, const std::string& text) {
     // An over-long name is cut to what fits on the wire, as the client always
     // did; the server then has no key for it.
     const std::string to = name.substr(0, MAX_NAME_LEN - 1);
-    if (text.size() > MAX_DIRECT_TEXT || to.empty() || !connected_) {
+    if (text.size() > MAX_DIRECT_TEXT || to.empty() || !connected_ || held_back(to)) {
         return false;
     }
     PeerKey key;
@@ -833,7 +855,7 @@ bool ChatClient::send_file(FileTarget target, const std::string& to, const std::
     std::string me;
     std::vector<uint8_t> my_key;
     if (sealed) {
-        if (!wait_for_key(to, &peer)) {
+        if (!wait_for_key(to, &peer) || held_back(to)) {
             return false;
         }
         me = my_name();

@@ -76,6 +76,10 @@ struct Ears {
         for (const auto& x : events) if (x == e) return true;
         return false;
     }
+    void clear() {
+        std::lock_guard<std::mutex> lock(m);
+        events.clear();
+    }
     ChatEvents events_for() {
         ChatEvents ev;
         ev.on_registered = [this](const std::string& n) { add("registered:" + n); };
@@ -652,6 +656,41 @@ static void end_to_end_tests() {
     a.send_direct("ben", "who are you");
     check(eve_ears.wait("direct:ann:who are you"), "sending again after the warning goes to the new holder");
     check(!eve_ears.heard("direct:ann:ben, it's me"), "the held message was never sent");
+
+    // A changed key that shows up on a message coming in is held back too.
+    a_ears.clear();
+    eve.disconnect();
+    check(a_ears.wait("presence:ben:left"), "eve leaves");
+    Ears mal_ears;
+    ChatClient mal(listen(mal_ears));
+    check(mal.connect("127.0.0.1", 18135, &error), "a third person connects");
+    mal.request_name("ben");
+    check(mal_ears.wait("registered:ben"), "and takes ben's name");
+    a_ears.clear();
+    mal.send_direct("ann", "hi ann");
+    check(a_ears.wait("direct:ben:hi ann"), "their message arrives");
+    check(a_ears.heard("key:ben:changed"), "with a warning that the key changed");
+    check(!a.send_direct("ben", "reply 1"), "the first answer is held back");
+    check(a_ears.wait("notice:Not sent: ben has a different key than last time. "
+                      "Check the safety code with them, then send again."), "and ann is told why");
+    check(a.send_direct("ben", "reply 2") && mal_ears.wait("direct:ann:reply 2"), "sending again goes");
+    check(!mal_ears.heard("direct:ann:reply 1"), "the held answer was never sent");
+
+    // Asking for the key ahead of time (as the app does on opening a chat)
+    // does not use up the warning.
+    a_ears.clear();
+    mal.disconnect();
+    check(a_ears.wait("presence:ben:left"), "they leave");
+    Ears zed_ears;
+    ChatClient zed(listen(zed_ears));
+    check(zed.connect("127.0.0.1", 18135, &error), "a fourth person connects");
+    zed.request_name("ben");
+    check(zed_ears.wait("registered:ben"), "and takes ben's name");
+    a_ears.clear();
+    check(a.request_key("ben") && a_ears.wait("key:ben:changed"), "ann fetches the new key and is warned");
+    check(!a.send_direct("ben", "first"), "the first message after it is held back");
+    check(a.send_direct("ben", "second") && zed_ears.wait("direct:ann:second"), "sending again goes");
+    check(!zed_ears.heard("direct:ann:first"), "the held message was never sent");
 }
 
 int main() {
