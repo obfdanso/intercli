@@ -104,7 +104,9 @@ Item {
                     color: parent.color
                 }
 
-                // A picture is shown; any file opens in its usual program when clicked.
+                // A picture is shown, and opens in the picture viewer when clicked.
+                // Anything else is never opened from here: a click shows its folder,
+                // so a program someone sent cannot be run by a slip of the mouse.
                 Image {
                     id: preview
                     visible: root.picture
@@ -124,8 +126,9 @@ Item {
                     anchors.fill: root.picture ? preview : body
                     cursorShape: Qt.PointingHandCursor
                     Accessible.role: Accessible.Button
-                    Accessible.name: "Open file"
-                    onClicked: Qt.openUrlExternally(root.file)
+                    Accessible.name: root.picture ? "Open picture" : "Show in folder"
+                    onClicked: Qt.openUrlExternally(root.picture ? root.file
+                                   : root.file.substring(0, root.file.lastIndexOf("/")))
                     z: 1
                 }
                 TextEdit {

@@ -363,7 +363,8 @@ inside the same encrypted channel as messages, so the host relays them like any 
 
 - **Desktop app:** drag a file onto the conversation. Received files are saved to
   `Downloads/intercli` (never over an existing file) and shown in the conversation;
-  pictures are previewed, and clicking a file opens it.
+  pictures are previewed and open when clicked; clicking any other file shows it in
+  its folder rather than opening it.
 - **Terminal client:** `/send @name path`, `/send #room path` or `/send all path`.
   Received files are saved to an `intercli-downloads` folder where the client was started.
 

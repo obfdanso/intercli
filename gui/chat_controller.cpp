@@ -853,6 +853,16 @@ void ChatController::onFile(const QString& from, SecureComm::FileTarget target, 
     // NewOnly: created only if nothing is there, even if it appeared just now.
     const bool saved = out.open(QIODevice::WriteOnly | QIODevice::NewOnly) && out.write(data) == data.size();
     out.close();
+#ifdef Q_OS_WIN
+    if (saved) {
+        // Marked as coming from elsewhere, the way a browser marks a download,
+        // so Windows warns before running it.
+        QFile mark(path + QStringLiteral(":Zone.Identifier"));
+        if (mark.open(QIODevice::WriteOnly)) {
+            mark.write("[ZoneTransfer]\r\nZoneId=3\r\n");
+        }
+    }
+#endif
 
     const QString label = fileLabel(safe, data.size());
     if (saved) {
