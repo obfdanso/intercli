@@ -36,6 +36,13 @@ int main() {
     check(read(first) == "one" && read(second) == "two", "and the first is left alone");
     const std::filesystem::path sneaky = save_download(dir, "../../escape.txt", one);
     check(sneaky.parent_path() == dir, "a name with folders in it stays in the downloads folder");
+    try {
+        const std::filesystem::path broken = save_download(dir, std::string("bad\xff\xfe name.txt"), one);
+        check(!broken.empty() && broken.parent_path() == dir && read(broken) == "one",
+              "a name that isn't valid text is still saved, under a plain name");
+    } catch (const std::exception&) {
+        check(false, "a name that isn't valid text does not throw");
+    }
 #ifdef _WIN32
     const std::string mark = read(first.string() + ":Zone.Identifier");
     check(mark.find("ZoneId=3") != std::string::npos, "it is marked as coming from elsewhere");

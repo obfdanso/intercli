@@ -18,18 +18,29 @@ std::FILE* create_new(const std::filesystem::path& path) {
 #endif
 }
 
+// The cleaned name as a path. A name that isn't valid UTF-8 can't be turned
+// into one on Windows (it throws), so it falls back to a plain name instead.
+std::filesystem::path as_path(const std::string& name) {
+    try {
+        return std::filesystem::u8path(name);
+    } catch (const std::exception&) {
+        return std::filesystem::path("received-file");
+    }
+}
+
 } // namespace
 
 std::filesystem::path save_download(const std::filesystem::path& dir, const std::string& name,
                                     const std::vector<uint8_t>& data) {
     // The name is the sender's choice, so it is cleaned first.
-    const std::string safe = safe_file_name(name);
+    const std::filesystem::path safe = as_path(safe_file_name(name));
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
-    std::filesystem::path target = dir / std::filesystem::u8path(safe);
+    std::filesystem::path target = dir / safe;
     std::FILE* file = create_new(target);
     for (int n = 1; !file && n < 1000; ++n) {
-        target = dir / std::filesystem::u8path(std::to_string(n) + "-" + safe);
+        target = dir / (std::to_string(n) + "-");
+        target += safe;
         file = create_new(target);
     }
     if (!file) {
