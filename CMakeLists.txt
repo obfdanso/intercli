@@ -55,6 +55,7 @@ endif()
 # Client protocol library shared by the terminal client and the desktop app
 add_library(intercli_client_core STATIC
     client/core/chat_client.cpp
+    client/core/key_store.cpp
 )
 
 target_include_directories(intercli_client_core PUBLIC include client/core)
@@ -152,6 +153,13 @@ add_executable(test_roster
 )
 target_link_libraries(test_roster intercli_client_core)
 add_test(NAME roster COMMAND test_roster)
+
+add_executable(test_key_store
+    tests/test_key_store.cpp
+)
+target_include_directories(test_key_store PRIVATE crypto)
+target_link_libraries(test_key_store intercli_client_core)
+add_test(NAME key_store COMMAND test_key_store)
 
 add_executable(test_chat_client
     tests/test_chat_client.cpp
