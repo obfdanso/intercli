@@ -1313,6 +1313,7 @@ struct SecureServer::Impl {
     std::map<std::string, std::string> seen_names_;  // name -> the address it last joined from
     std::mutex kept_mutex_;
     static constexpr size_t kMaxKeptPerPerson = 50;
+    static constexpr size_t kMaxKeptPerSender = 10;  // of those, from any one sender
     static constexpr size_t kMaxSeenNames = 1024;
 
     void remember_name(const std::string& name, const std::string& address) {
@@ -1329,7 +1330,16 @@ struct SecureServer::Impl {
             return false;
         }
         std::deque<Kept>& queue = kept_[to];
-        if (queue.size() >= kMaxKeptPerPerson) {
+        // Old ones make room first, and no single sender can fill the queue.
+        const auto now = std::chrono::steady_clock::now();
+        while (!queue.empty() && now - queue.front().when > std::chrono::hours(24)) {
+            queue.pop_front();
+        }
+        size_t from_sender = 0;
+        for (const Kept& kept : queue) {
+            from_sender += kept.sender == sender ? 1 : 0;
+        }
+        if (queue.size() >= kMaxKeptPerPerson || from_sender >= kMaxKeptPerSender) {
             return false;
         }
         queue.push_back(Kept{sender, text, std::chrono::steady_clock::now()});
