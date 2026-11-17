@@ -3,12 +3,12 @@ import QtQuick.Controls
 import Intercli.Backend
 
 // Message box: Enter sends, Shift+Enter adds a line, grows to five lines, and
-// counts bytes near the server's 1024-byte limit.
+// counts bytes near the limit for a message (a little lower for direct ones).
 Item {
     id: root
     property string placeholder: "Message"
     readonly property int bytes: Chat.utf8Length(input.text)
-    readonly property bool tooLong: bytes > 1024
+    readonly property bool tooLong: bytes > Chat.textLimit
     readonly property bool canSend: Chat.state === Chat.Online && input.text.trim().length > 0 && !tooLong
 
     implicitHeight: field.height + 24
@@ -79,7 +79,7 @@ Item {
             anchors.rightMargin: 12
             anchors.bottom: parent.bottom
             anchors.bottomMargin: 9
-            text: root.bytes + "/1024"
+            text: root.bytes + "/" + Chat.textLimit
             color: root.tooLong ? Theme.danger : Theme.textTertiary
             font.pixelSize: 11
         }

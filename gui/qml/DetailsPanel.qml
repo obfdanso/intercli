@@ -347,6 +347,50 @@ Rectangle {
                     Row2 { label: "Cipher"; value: Chat.session.cipher }
                     Row2 { label: "Key exchange"; value: "Diffie-Hellman" }
                     Row2 { label: "Server identity"; value: Chat.session.serverIdentity }
+                    // Direct messages are sealed between the two people; this
+                    // is how they check nobody sits in between.
+                    Item {
+                        visible: Chat.peerSafetyCode !== ""
+                        width: parent.width
+                        height: 104
+                        Text {
+                            textFormat: Text.PlainText
+                            x: 12
+                            y: 8
+                            text: "Private messages: safety code with " + Chat.currentConversation
+                            color: Theme.textSecondary
+                            font.pixelSize: 12
+                            width: parent.width - 24
+                            elide: Text.ElideRight
+                        }
+                        Text {
+                            textFormat: Text.PlainText
+                            x: 12
+                            y: 26
+                            // 60 digits: two lines of six groups.
+                            text: Chat.peerSafetyCode.substring(0, 35) + "\n" + Chat.peerSafetyCode.substring(36)
+                            color: Theme.text
+                            font.pixelSize: 12
+                            font.letterSpacing: 0.6
+                        }
+                        Text {
+                            textFormat: Text.PlainText
+                            x: 12
+                            y: 64
+                            width: parent.width - 24
+                            wrapMode: Text.WordWrap
+                            text: "Only the two of you can read these. If they see the same digits, nobody is in between."
+                            color: Theme.textTertiary
+                            font.pixelSize: 11
+                        }
+                        Rectangle {
+                            x: 12
+                            anchors.bottom: parent.bottom
+                            width: parent.width - 12
+                            height: 1
+                            color: Theme.separator
+                        }
+                    }
                     // Long, so on its own line under its label.
                     Item {
                         width: parent.width
