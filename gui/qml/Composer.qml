@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Dialogs
 import Intercli.Backend
 
 // Message box: Enter sends, Shift+Enter adds a line, grows to five lines, and
@@ -22,11 +23,55 @@ Item {
 
     function focusInput() { input.forceActiveFocus() }
 
+    // Files can also be dropped on the conversation.
+    FileDialog {
+        id: filePicker
+        title: "Send files"
+        fileMode: FileDialog.OpenFiles
+        onAccepted: {
+            for (let i = 0; i < selectedFiles.length; ++i)
+                Chat.sendFile(selectedFiles[i])
+        }
+    }
+
+    Rectangle {
+        id: attachButton
+        readonly property bool usable: Chat.state === Chat.Online
+        anchors.left: parent.left
+        anchors.leftMargin: 16
+        anchors.verticalCenter: field.bottom
+        anchors.verticalCenterOffset: -18
+        width: 28
+        height: 28
+        radius: 14
+        color: attachMouse.containsMouse && usable ? Qt.rgba(1, 1, 1, 0.12) : Qt.rgba(1, 1, 1, 0.06)
+        opacity: usable ? 1 : 0.35
+        Accessible.role: Accessible.Button
+        Accessible.name: "Send a file"
+        Accessible.onPressAction: if (usable) filePicker.open()
+
+        Text {
+            textFormat: Text.PlainText
+            anchors.centerIn: parent
+            text: "+"
+            color: Theme.text
+            font.pixelSize: 18
+        }
+        MouseArea {
+            id: attachMouse
+            anchors.fill: parent
+            enabled: attachButton.usable
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: filePicker.open()
+        }
+    }
+
     Rectangle {
         id: field
-        anchors.left: parent.left
+        anchors.left: attachButton.right
         anchors.right: sendButton.left
-        anchors.leftMargin: 16
+        anchors.leftMargin: 10
         anchors.rightMargin: 10
         anchors.bottom: parent.bottom
         anchors.bottomMargin: 14
