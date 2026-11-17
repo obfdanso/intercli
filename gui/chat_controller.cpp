@@ -448,7 +448,22 @@ bool ChatController::kickPerson(const QString& name) {
 }
 
 bool ChatController::banPerson(const QString& name) {
-    return hosting_ && host_session_ && name != my_name_ && host_session_->ban(name);
+    if (!hosting_ || !host_session_ || name == my_name_ || !host_session_->ban(name)) {
+        return false;
+    }
+    emit hostingChanged();
+    return true;
+}
+
+int ChatController::bannedCount() const {
+    return host_session_ ? host_session_->bannedCount() : 0;
+}
+
+void ChatController::clearBans() {
+    if (host_session_) {
+        host_session_->clearBans();
+        emit hostingChanged();
+    }
 }
 
 void ChatController::changeRoomCode() {

@@ -148,6 +148,52 @@ private slots:
         host.stop();
     }
 
+    void bans_last_until_cleared() {
+        HostSession host(dataDir.path());
+        host.clearBans();
+        QSignalSpy started(&host, &HostSession::started);
+        host.start(QStringLiteral("Danso"), kDiscovery);
+        QTRY_COMPARE_WITH_TIMEOUT(started.count(), 1, 5000);
+        const std::string code = host.roomCode().toStdString();
+        std::string err;
+        {
+            Registration reg;
+            SecureComm::ChatClient pest(reg.events());
+            QVERIFY(pest.connect("127.0.0.1", host.port(), &err));
+            pest.request_name("pest", code);
+            QVERIFY(reg.wait() == "ok:pest");
+            QVERIFY(host.ban(QStringLiteral("pest")));
+        }
+        QCOMPARE(host.bannedCount(), 1);
+        host.stop();
+
+        // Hosting again, even from a new session, keeps them out.
+        HostSession again(dataDir.path());
+        QCOMPARE(again.bannedCount(), 1);
+        QSignalSpy startedAgain(&again, &HostSession::started);
+        again.start(QStringLiteral("Danso"), kDiscovery);
+        QTRY_COMPARE_WITH_TIMEOUT(startedAgain.count(), 1, 5000);
+        {
+            Registration reg;
+            SecureComm::ChatClient pest(reg.events());
+            QVERIFY(pest.connect("127.0.0.1", again.port(), &err));
+            pest.request_name("pest", code);
+            QVERIFY(reg.wait().rfind("fail:", 0) == 0);
+        }
+
+        // Clearing the bans lets them back in at once.
+        again.clearBans();
+        QCOMPARE(again.bannedCount(), 0);
+        {
+            Registration reg;
+            SecureComm::ChatClient pest(reg.events());
+            QVERIFY(pest.connect("127.0.0.1", again.port(), &err));
+            pest.request_name("pest", code);
+            QVERIFY(reg.wait() == "ok:pest");
+        }
+        again.stop();
+    }
+
     void the_chat_shows_up_nearby_with_its_people() {
         HostSession host(dataDir.path());
         host.setPeoplePollForTests(200);

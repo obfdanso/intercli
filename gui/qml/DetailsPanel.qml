@@ -287,6 +287,23 @@ Rectangle {
                         color: Theme.textTertiary
                         font.pixelSize: 11
                     }
+                    Row {
+                        visible: Chat.bannedCount > 0
+                        spacing: 8
+                        Text {
+                            textFormat: Text.PlainText
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: Chat.bannedCount === 1 ? "1 person banned" : Chat.bannedCount + " people banned"
+                            color: Theme.textSecondary
+                            font.pixelSize: 12
+                        }
+                        HostButton {
+                            anchors.verticalCenter: parent.verticalCenter
+                            label: "Clear Bans"
+                            accessibleName: "Let everyone who was banned join again"
+                            onPressed: Chat.clearBans()
+                        }
+                    }
                     // With someone's conversation open, the host can remove them.
                     Row {
                         visible: !panel.everyone && panel.peerOnline
@@ -317,7 +334,7 @@ Rectangle {
                         visible: !panel.everyone && panel.peerOnline
                         width: parent.width
                         wrapMode: Text.Wrap
-                        text: "Removed people can join again. A ban lasts until you end the chat."
+                        text: "Removed people can join again. A ban lasts until you clear it, also when you host again."
                         color: Theme.textTertiary
                         font.pixelSize: 11
                     }

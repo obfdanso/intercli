@@ -11,6 +11,25 @@ namespace Intercli {
 
 namespace {
 
+const char kBannedNames[] = "host/bannedNames";
+const char kBannedAddresses[] = "host/bannedAddresses";
+
+std::vector<std::string> stdList(const QStringList& list) {
+    std::vector<std::string> out;
+    for (const QString& s : list) {
+        out.push_back(s.toStdString());
+    }
+    return out;
+}
+
+QStringList qList(const std::vector<std::string>& list) {
+    QStringList out;
+    for (const std::string& s : list) {
+        out.append(QString::fromStdString(s));
+    }
+    return out;
+}
+
 // 8081 is left out: the "who is hosting?" questions use it.
 const quint16 kPorts[] = {8080, 8082, 8083, 8084, 8085, 8086, 8087, 8088, 8089};
 
@@ -78,6 +97,9 @@ void HostSession::start(const QString& hostName, quint16 discoveryPort) {
         options.port = port;
         options.room_code = room_code_.toStdString();
         options.identity_private.assign(identity_private_.begin(), identity_private_.end());
+        const QSettings settings;
+        options.banned_names = stdList(settings.value(kBannedNames).toStringList());
+        options.banned_addresses = stdList(settings.value(kBannedAddresses).toStringList());
         auto server = std::make_unique<SecureComm::SecureServer>(options);
         if (server->start(&last_error)) {
             server_ = std::move(server);
@@ -123,7 +145,27 @@ bool HostSession::kick(const QString& name) {
 }
 
 bool HostSession::ban(const QString& name) {
-    return server_ && server_->ban(name.toStdString());
+    if (!server_ || !server_->ban(name.toStdString())) {
+        return false;
+    }
+    const SecureComm::SecureServer::Bans bans = server_->bans();
+    QSettings settings;
+    settings.setValue(kBannedNames, qList(bans.names));
+    settings.setValue(kBannedAddresses, qList(bans.addresses));
+    return true;
+}
+
+void HostSession::clearBans() {
+    if (server_) {
+        server_->clear_bans();
+    }
+    QSettings settings;
+    settings.remove(kBannedNames);
+    settings.remove(kBannedAddresses);
+}
+
+int HostSession::bannedCount() const {
+    return static_cast<int>(QSettings().value(kBannedNames).toStringList().size());
 }
 
 bool HostSession::newRoomCode() {
