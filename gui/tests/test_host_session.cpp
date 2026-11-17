@@ -194,6 +194,45 @@ private slots:
         again.stop();
     }
 
+    void one_ban_can_be_lifted() {
+        HostSession host(dataDir.path());
+        host.clearBans();
+        QSignalSpy started(&host, &HostSession::started);
+        host.start(QStringLiteral("Danso"), kDiscovery);
+        QTRY_COMPARE_WITH_TIMEOUT(started.count(), 1, 5000);
+        const std::string code = host.roomCode().toStdString();
+        std::string err;
+        const auto join = [&](const std::string& name) {
+            Registration reg;
+            SecureComm::ChatClient client(reg.events());
+            if (!client.connect("127.0.0.1", host.port(), &err)) {
+                return std::string("no connection");
+            }
+            client.request_name(name, code);
+            return reg.wait();
+        };
+        for (const char* name : {"ann", "bob"}) {
+            Registration reg;
+            SecureComm::ChatClient client(reg.events());
+            QVERIFY(client.connect("127.0.0.1", host.port(), &err));
+            client.request_name(name, code);
+            QVERIFY(reg.wait() == std::string("ok:") + name);
+            QVERIFY(host.ban(QString::fromLatin1(name)));
+        }
+        QCOMPARE(host.bannedNames(), QStringList({"ann", "bob"}));
+
+        QVERIFY(host.unban(QStringLiteral("ann")));
+        QVERIFY(!host.unban(QStringLiteral("ann")));
+        QCOMPARE(host.bannedNames(), QStringList({"bob"}));
+        QVERIFY(join("ann") == "ok:ann");
+        QVERIFY(join("bob").rfind("fail:", 0) == 0);
+        host.stop();
+
+        HostSession again(dataDir.path());
+        QCOMPARE(again.bannedNames(), QStringList({"bob"}));
+        again.clearBans();
+    }
+
     void the_chat_shows_up_nearby_with_its_people() {
         HostSession host(dataDir.path());
         host.setPeoplePollForTests(200);

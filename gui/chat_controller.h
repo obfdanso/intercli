@@ -63,6 +63,7 @@ class ChatController : public QObject {
     Q_PROPERTY(bool hosting READ hosting NOTIFY hostingChanged)
     Q_PROPERTY(QString roomCode READ roomCode NOTIFY hostingChanged)
     Q_PROPERTY(int bannedCount READ bannedCount NOTIFY hostingChanged)
+    Q_PROPERTY(QStringList bannedNames READ bannedNames NOTIFY hostingChanged)
     Q_PROPERTY(int peopleInChat READ peopleInChat NOTIFY peopleInChatChanged)
     Q_PROPERTY(QString safetyCode READ safetyCode NOTIFY sessionChanged)
     Q_PROPERTY(QString codeError READ codeError NOTIFY errorsChanged)
@@ -119,6 +120,7 @@ public:
     bool hosting() const { return hosting_; }
     QString roomCode() const;
     int bannedCount() const;
+    QStringList bannedNames() const;
     int peopleInChat() const;
     QString safetyCode() const;
     QString codeError() const { return code_error_; }
@@ -152,6 +154,7 @@ public:
     Q_INVOKABLE void changeRoomCode();
     // Bans last every time this PC hosts, until cleared.
     Q_INVOKABLE void clearBans();
+    Q_INVOKABLE void unbanPerson(const QString& name);
     Q_INVOKABLE void refreshNetworkCheck();
     // After comparing the new safety code with the host: remember the new
     // identity for this chat and join again.

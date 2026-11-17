@@ -459,6 +459,16 @@ int ChatController::bannedCount() const {
     return host_session_ ? host_session_->bannedCount() : 0;
 }
 
+QStringList ChatController::bannedNames() const {
+    return host_session_ ? host_session_->bannedNames() : QStringList();
+}
+
+void ChatController::unbanPerson(const QString& name) {
+    if (host_session_ && host_session_->unban(name)) {
+        emit hostingChanged();
+    }
+}
+
 void ChatController::clearBans() {
     if (host_session_) {
         host_session_->clearBans();

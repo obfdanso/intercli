@@ -5,6 +5,7 @@
 #include <QByteArray>
 #include <QObject>
 #include <QString>
+#include <QStringList>
 #include <QTimer>
 
 #include <memory>
@@ -47,8 +48,10 @@ public:
     // Kept on this PC, so it lasts every time this chat is hosted, until
     // clearBans().
     bool ban(const QString& name);
+    bool unban(const QString& name);  // false if that name isn't banned
     void clearBans();
-    int bannedCount() const;  // names banned
+    QStringList bannedNames() const;
+    int bannedCount() const;
     // Makes a new room code for people who join from now on, and keeps it for
     // next time. False when not hosting.
     bool newRoomCode();

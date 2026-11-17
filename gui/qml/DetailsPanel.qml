@@ -287,21 +287,46 @@ Rectangle {
                         color: Theme.textTertiary
                         font.pixelSize: 11
                     }
+                    // Who is banned, each with a way back in.
                     Row {
                         visible: Chat.bannedCount > 0
                         spacing: 8
                         Text {
                             textFormat: Text.PlainText
                             anchors.verticalCenter: parent.verticalCenter
-                            text: Chat.bannedCount === 1 ? "1 person banned" : Chat.bannedCount + " people banned"
+                            text: "Banned"
                             color: Theme.textSecondary
                             font.pixelSize: 12
                         }
                         HostButton {
+                            visible: Chat.bannedCount > 1
                             anchors.verticalCenter: parent.verticalCenter
                             label: "Clear Bans"
                             accessibleName: "Let everyone who was banned join again"
                             onPressed: Chat.clearBans()
+                        }
+                    }
+                    Repeater {
+                        model: Chat.bannedNames
+                        delegate: Row {
+                            required property string modelData
+                            spacing: 8
+                            Text {
+                                // A name is shown as typed, never as markup.
+                                textFormat: Text.PlainText
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: 120
+                                elide: Text.ElideRight
+                                text: modelData
+                                color: Theme.text
+                                font.pixelSize: 12
+                            }
+                            HostButton {
+                                anchors.verticalCenter: parent.verticalCenter
+                                label: "Unban"
+                                accessibleName: "Let " + modelData + " join again"
+                                onPressed: Chat.unbanPerson(modelData)
+                            }
                         }
                     }
                     // With someone's conversation open, the host can remove them.

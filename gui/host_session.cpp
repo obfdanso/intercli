@@ -7,27 +7,37 @@
 #include <QSettings>
 #include <QUuid>
 
+#include <algorithm>
+
 namespace Intercli {
 
 namespace {
 
-const char kBannedNames[] = "host/bannedNames";
-const char kBannedAddresses[] = "host/bannedAddresses";
+// Each ban is kept as "name<TAB>address" (address empty if none was banned).
+const char kBans[] = "host/bans";
 
-std::vector<std::string> stdList(const QStringList& list) {
-    std::vector<std::string> out;
-    for (const QString& s : list) {
-        out.push_back(s.toStdString());
+std::vector<SecureComm::ServerOptions::Ban> loadBans() {
+    std::vector<SecureComm::ServerOptions::Ban> out;
+    for (const QString& entry : QSettings().value(kBans).toStringList()) {
+        const QStringList parts = entry.split(QLatin1Char('	'));
+        if (!parts.value(0).isEmpty()) {
+            out.push_back({parts.value(0).toStdString(), parts.value(1).toStdString()});
+        }
     }
     return out;
 }
 
-QStringList qList(const std::vector<std::string>& list) {
-    QStringList out;
-    for (const std::string& s : list) {
-        out.append(QString::fromStdString(s));
+void saveBans(const std::vector<SecureComm::ServerOptions::Ban>& bans) {
+    QStringList list;
+    for (const auto& ban : bans) {
+        list.append(QString::fromStdString(ban.name) + QLatin1Char('	') + QString::fromStdString(ban.address));
     }
-    return out;
+    QSettings settings;
+    if (list.isEmpty()) {
+        settings.remove(kBans);
+    } else {
+        settings.setValue(kBans, list);
+    }
 }
 
 // 8081 is left out: the "who is hosting?" questions use it.
@@ -97,9 +107,7 @@ void HostSession::start(const QString& hostName, quint16 discoveryPort) {
         options.port = port;
         options.room_code = room_code_.toStdString();
         options.identity_private.assign(identity_private_.begin(), identity_private_.end());
-        const QSettings settings;
-        options.banned_names = stdList(settings.value(kBannedNames).toStringList());
-        options.banned_addresses = stdList(settings.value(kBannedAddresses).toStringList());
+        options.bans = loadBans();
         auto server = std::make_unique<SecureComm::SecureServer>(options);
         if (server->start(&last_error)) {
             server_ = std::move(server);
@@ -148,24 +156,40 @@ bool HostSession::ban(const QString& name) {
     if (!server_ || !server_->ban(name.toStdString())) {
         return false;
     }
-    const SecureComm::SecureServer::Bans bans = server_->bans();
-    QSettings settings;
-    settings.setValue(kBannedNames, qList(bans.names));
-    settings.setValue(kBannedAddresses, qList(bans.addresses));
+    saveBans(server_->bans());
     return true;
+}
+
+bool HostSession::unban(const QString& name) {
+    std::vector<SecureComm::ServerOptions::Ban> bans = loadBans();
+    const auto before = bans.size();
+    bans.erase(std::remove_if(bans.begin(), bans.end(),
+                              [&](const auto& ban) { return ban.name == name.toStdString(); }),
+               bans.end());
+    if (server_) {
+        server_->unban(name.toStdString());
+    }
+    saveBans(bans);
+    return bans.size() != before;
 }
 
 void HostSession::clearBans() {
     if (server_) {
         server_->clear_bans();
     }
-    QSettings settings;
-    settings.remove(kBannedNames);
-    settings.remove(kBannedAddresses);
+    saveBans({});
+}
+
+QStringList HostSession::bannedNames() const {
+    QStringList out;
+    for (const auto& ban : loadBans()) {
+        out.append(QString::fromStdString(ban.name));
+    }
+    return out;
 }
 
 int HostSession::bannedCount() const {
-    return static_cast<int>(QSettings().value(kBannedNames).toStringList().size());
+    return static_cast<int>(loadBans().size());
 }
 
 bool HostSession::newRoomCode() {
