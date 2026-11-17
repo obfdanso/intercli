@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -885,6 +886,8 @@ struct SecureServer::Impl {
                             LogLine(this, false) << "Registered " << wanted << " on session "
                                       << session.session_id;
                             broadcast_presence(wanted, true, wanted);
+                            remember_name(wanted);
+                            deliver_kept(conn);
                         }
                         continue;
                     }
@@ -899,7 +902,13 @@ struct SecureServer::Impl {
                             get_chat_field(chat.recipient, MAX_NAME_LEN);
                         std::shared_ptr<ClientConnection> target = lookup(to);
                         if (!target) {
-                            send_notice(conn, "No such user: " + to);
+                            // Someone who was here earlier gets it when they are back.
+                            if (keep_for_later(to, conn->name, get_chat_text(chat))) {
+                                send_receipt(conn, to, "queued");
+                                LogLine(this, false) << conn->name << " -> " << to << " (away, kept)";
+                            } else {
+                                send_notice(conn, "No such user: " + to);
+                            }
                             continue;
                         }
 
@@ -911,6 +920,7 @@ struct SecureServer::Impl {
                         set_chat_field(out.recipient, MAX_NAME_LEN, to);
                         set_chat_text(out, get_chat_text(chat));
                         send_chat(target, out);
+                        send_receipt(conn, to, "delivered");
 
                         // Who, never what: message text stays out of the log.
                         LogLine(this, false) << conn->name << " -> " << to;
@@ -930,6 +940,15 @@ struct SecureServer::Impl {
                         }
 
                         LogLine(this, false) << conn->name << " -> everyone";
+                        continue;
+                    }
+
+                    if (chat.type == ChatType::RECEIPT) {
+                        // Only "read" comes from a client, and only to someone here.
+                        std::shared_ptr<ClientConnection> target = lookup(get_chat_field(chat.recipient, MAX_NAME_LEN));
+                        if (target && get_chat_text(chat) == "read") {
+                            send_receipt(target, conn->name, "read");
+                        }
                         continue;
                     }
 
@@ -1102,6 +1121,87 @@ struct SecureServer::Impl {
                 break;
             }
         }
+    }
+
+    // Direct messages kept for people who are away. Only for names seen in this
+    // run of the server, a limited number each, and only for a day. All in
+    // memory: they go when the server stops.
+    struct Kept {
+        std::string sender;
+        std::string text;
+        std::chrono::steady_clock::time_point when;
+    };
+    std::map<std::string, std::deque<Kept>> kept_;
+    std::set<std::string> seen_names_;
+    std::mutex kept_mutex_;
+    static constexpr size_t kMaxKeptPerPerson = 50;
+    static constexpr size_t kMaxSeenNames = 1024;
+
+    void remember_name(const std::string& name) {
+        std::lock_guard<std::mutex> lock(kept_mutex_);
+        if (seen_names_.size() < kMaxSeenNames) {
+            seen_names_.insert(name);
+        }
+    }
+
+    // False if the name was never here, or its queue is full.
+    bool keep_for_later(const std::string& to, const std::string& sender, const std::string& text) {
+        std::lock_guard<std::mutex> lock(kept_mutex_);
+        if (seen_names_.count(to) == 0) {
+            return false;
+        }
+        std::deque<Kept>& queue = kept_[to];
+        if (queue.size() >= kMaxKeptPerPerson) {
+            return false;
+        }
+        queue.push_back(Kept{sender, text, std::chrono::steady_clock::now()});
+        return true;
+    }
+
+    // Hands over what was kept for the person who just joined, oldest first,
+    // and tells the senders who are still here that it arrived.
+    void deliver_kept(const std::shared_ptr<ClientConnection>& conn) {
+        std::deque<Kept> queue;
+        {
+            std::lock_guard<std::mutex> lock(kept_mutex_);
+            const auto it = kept_.find(conn->name);
+            if (it == kept_.end()) {
+                return;
+            }
+            queue = std::move(it->second);
+            kept_.erase(it);
+        }
+        const auto now = std::chrono::steady_clock::now();
+        while (!queue.empty() && now - queue.front().when > std::chrono::hours(24)) {
+            queue.pop_front();
+        }
+        if (queue.empty()) {
+            return;
+        }
+        send_notice(conn, std::to_string(queue.size()) +
+                              (queue.size() == 1 ? " message" : " messages") + " arrived while you were away");
+        std::set<std::string> senders;
+        for (const Kept& kept : queue) {
+            ChatMessage out = make_chat(ChatType::DIRECT);
+            set_chat_field(out.sender, MAX_NAME_LEN, kept.sender);
+            set_chat_field(out.recipient, MAX_NAME_LEN, conn->name);
+            set_chat_text(out, kept.text);
+            send_chat(conn, out);
+            senders.insert(kept.sender);
+        }
+        for (const std::string& sender : senders) {
+            if (std::shared_ptr<ClientConnection> back = lookup(sender)) {
+                send_receipt(back, conn->name, "delivered");
+            }
+        }
+    }
+
+    // Tells conn what became of its messages to (or was done by) about.
+    void send_receipt(const std::shared_ptr<ClientConnection>& conn, const std::string& about, const std::string& what) {
+        ChatMessage msg = make_chat(ChatType::RECEIPT);
+        set_chat_field(msg.sender, MAX_NAME_LEN, about);
+        set_chat_text(msg, what);
+        send_chat(conn, msg);
     }
 
     // Named rooms: who is in each. A room exists while it has members, so

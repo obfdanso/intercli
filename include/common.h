@@ -100,6 +100,10 @@ enum class ChatType : uint8_t {
     // of pieces (4 bytes each, little-endian). Piece 0 carries the size
     // (8 bytes) and the file name; the rest carry the bytes in order.
     FILE_CHUNK    = 0x0F,
+    // What became of direct messages. From the server, about the person in the
+    // sender field: "delivered", or "queued" (they are away; kept for them).
+    // From a client, to the person in the recipient field: "read".
+    RECEIPT       = 0x10,
 };
 
 // The four structs below travel on the wire as raw bytes, so every compiler
