@@ -121,6 +121,14 @@ ChatClient::ChatClient(ChatEvents events)
         throw std::runtime_error("WSAStartup failed");
     }
 #endif
+    store_ = std::make_shared<KeyStore>();
+}
+
+void ChatClient::use_key_store(std::shared_ptr<KeyStore> store) {
+    if (store) {
+        std::lock_guard<std::mutex> lock(e2e_mutex_);
+        store_ = std::move(store);
+    }
 }
 
 ChatClient::~ChatClient() {
@@ -137,6 +145,13 @@ void ChatClient::log(const std::string& line) {
 }
 
 bool ChatClient::connect(const std::string& host, uint16_t port, std::string* error) {
+    {
+        // Nothing learned in an earlier chat carries over.
+        std::lock_guard<std::mutex> lock(e2e_mutex_);
+        my_name_.clear();
+        peer_keys_.clear();
+        waiting_.clear();
+    }
     disconnect();
     user_disconnect_ = false;
 
@@ -411,23 +426,261 @@ SessionStatus ChatClient::status() const {
 
 bool ChatClient::request_name(const std::string& name, const std::string& room_code) {
     ChatMessage msg = make_chat(ChatType::REGISTER);
-    set_chat_text(msg, name);
+    // Our public key rides along after the name, for the server to hand to
+    // anyone who wants to write to us privately.
+    const std::vector<uint8_t> key = store_->public_key();
+    set_chat_text(msg, name + '\0' + std::string(key.begin(), key.end()));
     // The code travels in the otherwise unused recipient field, inside the
     // encrypted channel to the (now authenticated) server.
     set_chat_field(msg.recipient, MAX_NAME_LEN, normalize_room_code(room_code));
     return send_chat(msg);
 }
 
-bool ChatClient::send_direct(const std::string& to, const std::string& text) {
-    // An over-long name is truncated by set_chat_field, as the client always
-    // did; the server then answers "No such user".
-    if (text.size() > MAX_TEXT_LEN || to.empty()) {
+namespace {
+
+// Direct messages held back at once while one person's key is fetched.
+constexpr size_t kMaxWaiting = 100;
+// How long a file waits for the key of the person it is for.
+constexpr std::chrono::seconds kKeyWait(5);
+constexpr size_t kMaxPeerKeys = 4096;
+
+// What a sealed message is tied to: its kind ('m' message, 'f' file piece),
+// who wrote it and who it is for, so it cannot be passed off as another.
+std::vector<uint8_t> e2e_aad(char kind, const std::string& from, const std::string& to,
+                             const std::string& extra = "") {
+    std::string s = "intercli e2e v1";
+    s.push_back('\0');
+    s.push_back(kind);
+    s.push_back('\0');
+    s += from;
+    s.push_back('\0');
+    s += to;
+    s.push_back('\0');
+    s += extra;
+    return std::vector<uint8_t>(s.begin(), s.end());
+}
+
+} // namespace
+
+std::string ChatClient::my_name() const {
+    std::lock_guard<std::mutex> lock(e2e_mutex_);
+    return my_name_;
+}
+
+// Tells chats apart in the key store: the same name in two chats is two people.
+std::string ChatClient::chat_scope() const {
+    return server_identity_.empty() ? "open" : bytes_to_hex(server_identity_);
+}
+
+std::string ChatClient::seal_for(const std::vector<uint8_t>& key, const std::vector<uint8_t>& aad,
+                                 const std::string& plain) {
+    const std::vector<uint8_t> nonce = crypto_->generate_random_bytes(IV_SIZE);
+    const std::vector<uint8_t> sealed =
+        crypto_->encrypt_aes_gcm(std::vector<uint8_t>(plain.begin(), plain.end()), key, nonce, aad);
+    std::string out(nonce.begin(), nonce.end());
+    out.append(sealed.begin(), sealed.end());
+    return out;
+}
+
+bool ChatClient::open_from(const std::vector<uint8_t>& key, const std::vector<uint8_t>& aad,
+                           const std::string& sealed, std::string* plain) {
+    if (sealed.size() < E2E_SEAL_OVERHEAD) {
         return false;
     }
-    ChatMessage msg = make_chat(ChatType::DIRECT);
-    set_chat_field(msg.recipient, MAX_NAME_LEN, to);
-    set_chat_text(msg, text);
-    return send_chat(msg);
+    try {
+        const std::vector<uint8_t> nonce(sealed.begin(), sealed.begin() + IV_SIZE);
+        const std::vector<uint8_t> opened =
+            crypto_->decrypt_aes_gcm(std::vector<uint8_t>(sealed.begin() + IV_SIZE, sealed.end()), key, nonce, aad);
+        plain->assign(opened.begin(), opened.end());
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+// The key shared with whoever holds pub. Nothing is remembered yet: that
+// waits until the key has proved itself (see record_key).
+bool ChatClient::peer_key_from(const std::string& name, const std::vector<uint8_t>& pub, PeerKey* out) {
+    {
+        std::lock_guard<std::mutex> lock(e2e_mutex_);
+        const auto it = peer_keys_.find(name);
+        if (it != peer_keys_.end() && it->second.pub == pub) {
+            *out = it->second;
+            return true;
+        }
+    }
+    try {
+        out->pub = pub;
+        out->key = e2e_shared_key(store_->private_key(), pub);
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+void ChatClient::record_key(const std::string& name, const PeerKey& key) {
+    {
+        std::lock_guard<std::mutex> lock(e2e_mutex_);
+        const auto it = peer_keys_.find(name);
+        if (it != peer_keys_.end() && it->second.pub == key.pub) {
+            return;
+        }
+        if (it != peer_keys_.end() || peer_keys_.size() < kMaxPeerKeys) {
+            peer_keys_[name] = key;
+        }
+    }
+    const KeyStore::Seen seen = store_->remember(chat_scope(), name, key.pub);
+    if (events_.on_peer_key) {
+        events_.on_peer_key(name, seen == KeyStore::Seen::Changed);
+    }
+}
+
+bool ChatClient::ask_key(const std::string& name) {
+    ChatMessage msg = make_chat(ChatType::KEY);
+    set_chat_field(msg.recipient, MAX_NAME_LEN, name);
+    if (send_chat(msg)) {
+        return true;
+    }
+    {
+        std::lock_guard<std::mutex> lock(e2e_mutex_);
+        waiting_.erase(name);
+    }
+    key_arrived_.notify_all();
+    return false;
+}
+
+bool ChatClient::request_key(const std::string& peer) {
+    if (!is_valid_name(peer)) {
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(e2e_mutex_);
+        if (waiting_.count(peer) > 0) {
+            return true;
+        }
+        waiting_[peer];
+    }
+    return ask_key(peer);
+}
+
+bool ChatClient::wait_for_key(const std::string& name, PeerKey* out) {
+    std::unique_lock<std::mutex> lock(e2e_mutex_);
+    if (peer_keys_.count(name) == 0) {
+        if (waiting_.count(name) == 0) {
+            waiting_[name];
+            lock.unlock();
+            if (!ask_key(name)) {
+                return false;
+            }
+            lock.lock();
+        }
+        key_arrived_.wait_for(lock, kKeyWait, [&] {
+            return peer_keys_.count(name) > 0 || waiting_.count(name) == 0;
+        });
+    }
+    const auto it = peer_keys_.find(name);
+    if (it == peer_keys_.end()) {
+        return false;
+    }
+    *out = it->second;
+    return true;
+}
+
+// The server's answer to ask_key. Receive thread.
+void ChatClient::handle_key(const std::string& name, const std::string& key) {
+    PeerKey peer;
+    const bool ok = key.size() == E2E_KEY_SIZE &&
+                    peer_key_from(name, std::vector<uint8_t>(key.begin(), key.end()), &peer);
+    if (ok) {
+        record_key(name, peer);
+    }
+    // What was waiting goes out in the order it was written. The entry stays
+    // until nothing is left, so a message sent meanwhile queues up behind.
+    bool dropped = false;
+    for (;;) {
+        std::vector<std::string> texts;
+        {
+            std::lock_guard<std::mutex> lock(e2e_mutex_);
+            const auto it = waiting_.find(name);
+            if (it == waiting_.end()) {
+                break;
+            }
+            if (it->second.empty()) {
+                waiting_.erase(it);
+                break;
+            }
+            texts.swap(it->second);
+        }
+        for (const std::string& text : texts) {
+            if (ok) {
+                send_sealed_direct(name, peer, text);
+            } else {
+                dropped = true;
+            }
+        }
+    }
+    key_arrived_.notify_all();
+    if (dropped && events_.on_notice) {
+        // The server knows no key for that name, so nobody by it has been
+        // here. Nothing is ever sent unsealed instead.
+        events_.on_notice("No such user: " + name);
+    }
+}
+
+bool ChatClient::send_sealed_direct(const std::string& to, const PeerKey& key, const std::string& text) {
+    try {
+        const std::vector<uint8_t> mine = store_->public_key();
+        ChatMessage msg = make_chat(ChatType::DIRECT);
+        set_chat_field(msg.recipient, MAX_NAME_LEN, to);
+        set_chat_text(msg, std::string(mine.begin(), mine.end()) +
+                               seal_for(key.key, e2e_aad('m', my_name(), to), text));
+        return send_chat(msg);
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+std::string ChatClient::safety_code_with(const std::string& peer) const {
+    std::vector<uint8_t> theirs;
+    {
+        std::lock_guard<std::mutex> lock(e2e_mutex_);
+        const auto it = peer_keys_.find(peer);
+        if (it != peer_keys_.end()) {
+            theirs = it->second.pub;
+        }
+    }
+    if (theirs.empty()) {
+        theirs = store_->known(chat_scope(), peer);
+    }
+    return theirs.empty() ? std::string() : pair_safety_code(store_->public_key(), theirs);
+}
+
+bool ChatClient::send_direct(const std::string& name, const std::string& text) {
+    // An over-long name is cut to what fits on the wire, as the client always
+    // did; the server then has no key for it.
+    const std::string to = name.substr(0, MAX_NAME_LEN - 1);
+    if (text.size() > MAX_DIRECT_TEXT || to.empty() || !connected_) {
+        return false;
+    }
+    PeerKey key;
+    {
+        std::unique_lock<std::mutex> lock(e2e_mutex_);
+        const auto known = peer_keys_.find(to);
+        const auto queue = waiting_.find(to);
+        if (known == peer_keys_.end() || queue != waiting_.end()) {
+            // No key yet, or earlier messages are still going out: wait in line.
+            const bool ask = queue == waiting_.end();
+            std::vector<std::string>& texts = waiting_[to];
+            if (texts.size() >= kMaxWaiting) {
+                return false;
+            }
+            texts.push_back(text);
+            lock.unlock();
+            return ask ? ask_key(to) : true;
+        }
+        key = known->second;
+    }
+    return send_sealed_direct(to, key, text);
 }
 
 bool ChatClient::send_broadcast(const std::string& text) {
@@ -513,9 +766,12 @@ uint64_t get_number(const std::string& in, size_t at, int bytes) {
     return value;
 }
 
-uint32_t pieces_for(uint64_t size) {
-    return 1 + static_cast<uint32_t>((size + FILE_CHUNK_DATA - 1) / FILE_CHUNK_DATA);
+uint32_t pieces_for(uint64_t size, size_t chunk) {
+    return 1 + static_cast<uint32_t>((size + chunk - 1) / chunk);
 }
+
+// A sealed piece carries less: room is needed for the nonce and the tag.
+constexpr size_t kSealedChunk = FILE_CHUNK_DATA - E2E_SEAL_OVERHEAD;
 
 // Unfinished files kept at once: a couple per sender, and a few senders.
 constexpr size_t kMaxIncomingFiles = 8;
@@ -533,21 +789,50 @@ bool ChatClient::send_file(FileTarget target, const std::string& to, const std::
     if (target != FileTarget::Everyone && !is_valid_name(to)) {
         return false;
     }
+    // A file for one person is sealed for them, like a direct message.
+    const bool sealed = target == FileTarget::Direct;
+    PeerKey peer;
+    std::string me;
+    std::vector<uint8_t> my_key;
+    if (sealed) {
+        if (!wait_for_key(to, &peer)) {
+            return false;
+        }
+        me = my_name();
+        my_key = store_->public_key();
+    }
+    const size_t chunk = sealed ? kSealedChunk : FILE_CHUNK_DATA;
     const char kind = target == FileTarget::Direct ? 'd' : target == FileTarget::Room ? 'r' : 'e';
     const std::vector<uint8_t> id = crypto_->generate_random_bytes(8);
-    const uint32_t total = pieces_for(data.size());
+    const uint32_t total = pieces_for(data.size(), chunk);
     for (uint32_t seq = 0; seq < total; ++seq) {
-        std::string body(1, kind);
-        body.append(id.begin(), id.end());
-        put_number(body, seq, 4);
-        put_number(body, total, 4);
+        std::string head(1, kind);
+        head.append(id.begin(), id.end());
+        put_number(head, seq, 4);
+        put_number(head, total, 4);
+        std::string piece;
         if (seq == 0) {
-            put_number(body, data.size(), 8);
-            body += name;
+            put_number(piece, data.size(), 8);
+            piece += name;
         } else {
-            const size_t offset = static_cast<size_t>(seq - 1) * FILE_CHUNK_DATA;
-            const size_t length = (std::min)(FILE_CHUNK_DATA, data.size() - offset);
-            body.append(reinterpret_cast<const char*>(data.data()) + offset, length);
+            const size_t offset = static_cast<size_t>(seq - 1) * chunk;
+            const size_t length = (std::min)(chunk, data.size() - offset);
+            piece.assign(reinterpret_cast<const char*>(data.data()) + offset, length);
+        }
+        std::string body = head;
+        try {
+            if (sealed) {
+                // The header is tied in, so pieces can't be dropped, swapped
+                // or moved to another file unnoticed.
+                if (seq == 0) {
+                    body.append(my_key.begin(), my_key.end());
+                }
+                body += seal_for(peer.key, e2e_aad('f', me, to, head), piece);
+            } else {
+                body += piece;
+            }
+        } catch (const std::exception&) {
+            return false;
         }
         ChatMessage msg = make_chat(ChatType::FILE_CHUNK);
         if (target != FileTarget::Everyone) {
@@ -571,17 +856,35 @@ void ChatClient::handle_file_chunk(const ChatMessage& msg, const std::string& fr
     const std::string key = from + '\0' + body.substr(1, 8);
     const uint32_t seq = static_cast<uint32_t>(get_number(body, 9, 4));
     const uint32_t total = static_cast<uint32_t>(get_number(body, 13, 4));
+    // What the piece carries after its header. In a file for us alone it is
+    // sealed, and the first piece brings the sender's public key.
+    const std::string head = body.substr(0, FILE_CHUNK_HEADER);
+    std::string payload = body.substr(FILE_CHUNK_HEADER);
 
     if (seq == 0) {
-        if (body.size() < FILE_CHUNK_HEADER + 9 || (kind != 'd' && kind != 'e' && kind != 'r')) {
+        PeerKey sender;
+        if (kind == 'd') {
+            if (payload.size() < E2E_KEY_SIZE ||
+                !peer_key_from(from, std::vector<uint8_t>(payload.begin(), payload.begin() + E2E_KEY_SIZE), &sender) ||
+                !open_from(sender.key, e2e_aad('f', from, my_name(), head), payload.substr(E2E_KEY_SIZE), &payload)) {
+                if (events_.on_notice) {
+                    events_.on_notice("A file from " + from + " could not be read");
+                }
+                return;
+            }
+            record_key(from, sender);
+        }
+        if (payload.size() < 9 || (kind != 'd' && kind != 'e' && kind != 'r')) {
             return;
         }
         IncomingFile file;
         file.kind = kind;
-        file.size = get_number(body, FILE_CHUNK_HEADER, 8);
-        file.name = body.substr(FILE_CHUNK_HEADER + 8);
+        file.key = sender.key;
+        file.size = get_number(payload, 0, 8);
+        file.name = payload.substr(8);
         file.total = total;
-        if (file.size > MAX_FILE_SIZE || file.name.size() > MAX_FILE_NAME_LEN || total != pieces_for(file.size)) {
+        if (file.size > MAX_FILE_SIZE || file.name.size() > MAX_FILE_NAME_LEN ||
+            total != pieces_for(file.size, kind == 'd' ? kSealedChunk : FILE_CHUNK_DATA)) {
             return;
         }
         if (kind == 'r') {
@@ -621,12 +924,16 @@ void ChatClient::handle_file_chunk(const ChatMessage& msg, const std::string& fr
             return;
         }
         IncomingFile& file = it->second;
-        const size_t length = body.size() - FILE_CHUNK_HEADER;
+        if (file.kind == 'd' && !open_from(file.key, e2e_aad('f', from, my_name(), head), payload, &payload)) {
+            incoming_files_.erase(it);
+            return;
+        }
+        const size_t length = payload.size();
         if (seq != file.next || total != file.total || file.data.size() + length > file.size) {
             incoming_files_.erase(it);
             return;
         }
-        file.data.insert(file.data.end(), body.begin() + FILE_CHUNK_HEADER, body.end());
+        file.data.insert(file.data.end(), payload.begin(), payload.end());
         file.last_piece = std::chrono::steady_clock::now();
         ++file.next;
     }
@@ -773,14 +1080,33 @@ void ChatClient::handle_chat(const ChatMessage& msg) {
 
     switch (msg.type) {
         case ChatType::REGISTER_OK:
+            {
+                std::lock_guard<std::mutex> lock(e2e_mutex_);
+                my_name_ = text;
+            }
             if (events_.on_registered) events_.on_registered(text);
+            break;
+        case ChatType::KEY:
+            handle_key(from, text);
             break;
         case ChatType::REGISTER_FAIL:
             if (events_.on_register_failed) events_.on_register_failed(text);
             break;
-        case ChatType::DIRECT:
-            if (events_.on_direct) events_.on_direct(from, text);
+        case ChatType::DIRECT: {
+            // Sealed by the sender, whose public key comes first. The key is
+            // only remembered once it has opened the message.
+            PeerKey sender;
+            std::string plain;
+            if (text.size() >= E2E_KEY_SIZE &&
+                peer_key_from(from, std::vector<uint8_t>(text.begin(), text.begin() + E2E_KEY_SIZE), &sender) &&
+                open_from(sender.key, e2e_aad('m', from, my_name()), text.substr(E2E_KEY_SIZE), &plain)) {
+                record_key(from, sender);
+                if (events_.on_direct) events_.on_direct(from, plain);
+            } else if (events_.on_notice) {
+                events_.on_notice("A private message from " + from + " could not be read");
+            }
             break;
+        }
         case ChatType::BROADCAST:
             if (events_.on_broadcast) events_.on_broadcast(from, text);
             break;
@@ -816,6 +1142,12 @@ void ChatClient::handle_chat(const ChatMessage& msg) {
             const std::string joined_suffix = " joined";
             const bool joined = text.size() >= joined_suffix.size() &&
                 text.compare(text.size() - joined_suffix.size(), joined_suffix.size(), joined_suffix) == 0;
+            {
+                // Whoever holds the name next may not be the same person: ask
+                // for the key again before writing to them.
+                std::lock_guard<std::mutex> lock(e2e_mutex_);
+                peer_keys_.erase(from);
+            }
             if (events_.on_presence) events_.on_presence(from, joined, text);
             break;
         }

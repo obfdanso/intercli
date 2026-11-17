@@ -5,8 +5,10 @@
 // callbacks. The terminal client and the desktop app are both front ends over it.
 
 #include "common.h"
+#include "key_store.h"
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -46,6 +48,10 @@ struct ChatEvents {
     // What became of our direct messages to peer: "delivered", "queued" (they
     // are away and will get them when back) or "read".
     std::function<void(const std::string& peer, const std::string& what)> on_receipt;
+    // A person's key for private messages was learned (again, after they
+    // rejoin). changed: it is not the key that name had last time, so it may
+    // be someone else; safety_code_with() is how the two can check.
+    std::function<void(const std::string& name, bool changed)> on_peer_key;
     std::function<void(const std::string& text)> on_notice;
     std::function<void(const std::string& text)> on_server_error;
     std::function<void()> on_send_key_rotated;
@@ -81,6 +87,16 @@ public:
     // was refused for not matching the expected one).
     std::vector<uint8_t> server_identity() const;
 
+    // Where this person's key for private messages and the keys seen for
+    // others are kept. Call before connect(). Without one a new key is made
+    // every run and nobody is remembered.
+    void use_key_store(std::shared_ptr<KeyStore> store);
+    // 60 digits both people can compare to be sure nobody sits in between;
+    // empty until peer's key is known (see request_key).
+    std::string safety_code_with(const std::string& peer) const;
+    // Asks the server for peer's key; on_peer_key fires when it is new.
+    bool request_key(const std::string& peer);
+
     // Blocking: resolves the host, connects, runs the handshake and starts the
     // receive thread. On failure returns false and, if error is given, a reason.
     bool connect(const std::string& host, uint16_t port, std::string* error);
@@ -97,8 +113,12 @@ public:
     // room_code is needed for a hosted chat; it is ignored by an open server.
     bool request_name(const std::string& name, const std::string& room_code = "");
 
-    // Text over MAX_TEXT_LEN bytes is rejected (returns false, nothing is sent).
+    // A direct message is sealed so that only the two people can read it, not
+    // the server. Text over MAX_DIRECT_TEXT bytes is rejected (returns false,
+    // nothing is sent). If the person's key has to be fetched first the
+    // message waits for it; a notice follows if they turn out to have none.
     bool send_direct(const std::string& to, const std::string& text);
+    // Text over MAX_TEXT_LEN bytes is rejected.
     bool send_broadcast(const std::string& text);
     bool request_roster();
     // Tells peer that their direct messages have been read.
@@ -113,8 +133,10 @@ public:
 
     // Sends a file of up to MAX_FILE_SIZE bytes in pieces. Blocking, so call it
     // off the UI thread; other messages can be sent meanwhile. to is the
-    // person or room (unused for Everyone). False if it is too big, the name
-    // is empty or over 255 bytes, or the connection fails part-way.
+    // person or room (unused for Everyone). A file for one person is sealed
+    // like a direct message. False if it is too big, the name is empty or
+    // over 255 bytes, the person has no key, or the connection fails part-way.
+    // Not to be called from a callback.
     bool send_file(FileTarget target, const std::string& to, const std::string& name,
                    const std::vector<uint8_t>& data);
     bool rotate_send_key();
@@ -135,6 +157,22 @@ private:
     // quiet: don't report key rotations (a file would report hundreds).
     bool send_chat(const ChatMessage& chat, bool quiet = false);
     void handle_file_chunk(const ChatMessage& msg, const std::string& from, const std::string& body);
+    // End-to-end encryption.
+    struct PeerKey {
+        std::vector<uint8_t> pub;  // their public key
+        std::vector<uint8_t> key;  // the AES key shared with them
+    };
+    std::string my_name() const;
+    std::string chat_scope() const;
+    bool peer_key_from(const std::string& name, const std::vector<uint8_t>& pub, PeerKey* out);
+    void record_key(const std::string& name, const PeerKey& key);
+    bool ask_key(const std::string& name);
+    bool wait_for_key(const std::string& name, PeerKey* out);
+    void handle_key(const std::string& name, const std::string& key);
+    bool send_sealed_direct(const std::string& to, const PeerKey& key, const std::string& text);
+    std::string seal_for(const std::vector<uint8_t>& key, const std::vector<uint8_t>& aad, const std::string& plain);
+    bool open_from(const std::vector<uint8_t>& key, const std::vector<uint8_t>& aad, const std::string& sealed,
+                   std::string* plain);
     bool rotate_locked();
     std::vector<uint8_t> seal_frame(MessageType type, const std::vector<uint8_t>& plain);
     bool open_frame(const std::vector<uint8_t>& frame, std::vector<uint8_t>* plain);
@@ -188,12 +226,23 @@ private:
         uint32_t total = 0;
         uint32_t next = 1;
         std::vector<uint8_t> data;
+        std::vector<uint8_t> key;  // for a file sealed for us: the key shared with the sender
         std::chrono::steady_clock::time_point last_piece;
     };
     std::map<std::string, IncomingFile> incoming_files_;
 
     std::vector<uint8_t> expected_identity_;
     std::vector<uint8_t> server_identity_;
+
+    // Guards the rest: the name we hold, the keys shared with people in this
+    // session, and direct messages waiting for a key to arrive (an entry,
+    // even an empty one, means the key has been asked for).
+    mutable std::mutex e2e_mutex_;
+    std::condition_variable key_arrived_;
+    std::shared_ptr<KeyStore> store_;
+    std::string my_name_;
+    std::map<std::string, PeerKey> peer_keys_;
+    std::map<std::string, std::vector<std::string>> waiting_;
 };
 
 // Parses the server's "Online (N): a, b, c" reply. Names never contain spaces,
