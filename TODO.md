@@ -4,12 +4,10 @@ Known limits, written down so they aren't forgotten. Each is something that work
 but should be better.
 
 ## File transfer
-- No attach button in the desktop app: drag and drop is the only way to send a file.
 - No progress bar and no cancel. A file shows as sent at once; a failure is reported after.
 - After restarting the app, a saved file message is text only (no preview, no click).
 - Slow for big files: an 8 MB file is about 8,000 messages with a key rotation every ten.
   Only tested with files of a few tens of KB.
-- The terminal client doesn't mark received files as downloaded (the app does, on Windows).
 
 ## Rooms
 - No member list for a room.
@@ -17,7 +15,8 @@ but should be better.
 
 ## Host controls
 - Only in the desktop app; `server.exe` can't kick, ban or change the room code.
-- Bans last until the chat ends and aren't kept between sessions.
+- Bans are kept in the host's settings with no list of who is banned: the app shows a
+  count, and Clear Bans lets everyone back in at once (no unbanning one person).
 - A ban is by name and exact address. Someone who changes both can rejoin if they know
   the room code (worse on IPv6, where changing address is easy). Banning the person's
   key as well would help; until then, change the room code after a ban.
@@ -31,7 +30,8 @@ but should be better.
   it over at all.
 - Kept messages live in the server's memory: they are lost when the chat ends, capped at
   50 per person (10 from any one sender), and dropped after 24 hours.
-- Kept messages arrive without their original time.
+- A kept message's time comes from the sender's clock, so a PC with the wrong time
+  shows the wrong time (only believed between a minute and a week old).
 - Read receipts can't be switched off, and exist only for direct messages.
 
 ## Server
@@ -48,10 +48,9 @@ but should be better.
   use up its neighbours' guesses over IPv6. IPv4 is unaffected.
 - "Chats nearby" discovery is IPv4 only; the host's address in the details panel lists
   IPv4 addresses only.
-- If the discovery port can't be used, hosting works but the chat silently doesn't show
-  under "Chats nearby".
 - A hosted chat in the desktop app has no switch for IPv6 beyond the local network.
-- Someone who connects but never picks a name can stay connected indefinitely.
+- Someone who connects but never picks a name is only closed after five minutes (long
+  enough for a person typing at the terminal client's prompt).
 
 ## Chat
 - The "who is online" reply holds about 30 long names; more only appear as they join.
@@ -75,10 +74,17 @@ but should be better.
 ## Still to build
 - X25519 + HKDF key exchange for the connection to the server, with explicit
   serialisation (skipped for now; direct messages already use X25519 + HKDF).
-- Packaging and CI: installer, GitHub Actions builds, fuzzing of the frame parser.
+- Packaging: the NSIS installer has never been built locally (no makensis here), and
+  neither package has been unpacked and run on a clean PC. The README has no Packaging,
+  CI or Fuzzing section yet, and there is no LICENSE file although the README has a
+  License section.
+- CI uses actions on Node.js 20, which GitHub warns is deprecated; move to newer
+  versions when they are out for all the actions used.
+- macOS is not built in CI.
 
 ## Never checked on screen
 These compile and their logic is tested, but nobody has clicked through them yet:
-host buttons (Remove, Ban, New Code), the room box and Leave Room, drag-and-drop sending,
-picture previews, click on a file, the receipt line under a conversation, the safety
-code for private messages in the details panel, and the key-change warning.
+host buttons (Remove, Ban, New Code, Clear Bans), the room box and Leave Room,
+drag-and-drop sending, the attach button and its file picker, the "Chats nearby" warning
+for a host, picture previews, click on a file, the receipt line under a conversation,
+the safety code for private messages in the details panel, and the key-change warning.
