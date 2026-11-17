@@ -588,6 +588,12 @@ struct SecureServer::Impl {
                     LogLine(this, true) << "Handshake failed for client " << conn->client_id;
                     conn->alive = false;
                 }
+                // The name is only set on this thread, so it can be read here.
+                if (conn->alive && conn->stage == ClientConnection::Stage::Chat && conn->name.empty() &&
+                    now > conn->deadline) {
+                    LogLine(this, false) << "Dropped client " << conn->client_id << ", which never picked a name";
+                    conn->alive = false;
+                }
                 if (!conn->alive) {
                     close_connection(conn);
                 }
@@ -675,6 +681,8 @@ struct SecureServer::Impl {
                         return false;
                     }
                     conn->stage = ClientConnection::Stage::Chat;
+                    // From now on the deadline is for picking a name.
+                    conn->deadline = std::chrono::steady_clock::now() + options_.name_timeout;
                     LogLine(this, false) << "Handshake completed successfully for client " << conn->client_id;
                     return true;
                 case ClientConnection::Stage::Chat:

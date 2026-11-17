@@ -33,6 +33,9 @@ struct ServerOptions {
     // reachable from the whole internet, with no router in between hiding it
     // the way home routers hide IPv4, so anything wider must be switched on.
     bool allow_global_ipv6 = false;
+    // How long a connection may stay without picking a name, once the
+    // handshake is done. Long enough for someone typing one at a prompt.
+    std::chrono::seconds name_timeout = std::chrono::seconds(300);
     // The server's long-term identity (32-byte Ed25519 private key). Empty: a
     // temporary identity is made for this run.
     std::vector<uint8_t> identity_private;

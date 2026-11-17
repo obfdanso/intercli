@@ -693,6 +693,24 @@ static void end_to_end_tests() {
     check(!zed_ears.heard("direct:ann:first"), "the held message was never sent");
 }
 
+// Someone who connects but never picks a name is let go after a while.
+static void name_timeout_tests() {
+    ServerOptions options;
+    options.port = 18136;
+    options.name_timeout = std::chrono::seconds(2);
+    Running server(options);
+    check(server.ok, "a server with a short time to pick a name starts");
+    std::string error;
+    Ears idle_ears, named_ears;
+    ChatClient idle(idle_ears.events_for()), named(named_ears.events_for());
+    check(idle.connect("127.0.0.1", 18136, &error) && named.connect("127.0.0.1", 18136, &error),
+          "two clients connect");
+    named.request_name("nia");
+    check(named_ears.wait("registered:nia"), "one picks a name");
+    check(idle_ears.wait_lost(6000), "the one that never picks a name is disconnected");
+    check(!named_ears.wait_lost(1000), "the one with a name stays");
+}
+
 int main() {
     const uint16_t port = 18090;
 
@@ -763,6 +781,9 @@ int main() {
     std::cout << "Away messages and receipts" << std::endl;
     receipt_tests();
     end_to_end_tests();
+
+    std::cout << "Time to pick a name" << std::endl;
+    name_timeout_tests();
 
     if (failures == 0) {
         std::cout << "All server core tests passed" << std::endl;
