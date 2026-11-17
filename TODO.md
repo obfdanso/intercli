@@ -36,6 +36,10 @@ but should be better.
 - One event loop serves every connection. The key exchange for a new connection runs in
   that loop, so many people joining at the same moment wait on each other.
 - Never measured with many clients (tests use a handful).
+- While one client has a lot of output waiting, the server stops reading from everyone
+  until it drains. A client that takes it too slowly is dropped after about five seconds,
+  but could reconnect and do it again; flow control per sender would be better.
+- A client on a very slow link (under about 50 KB/s) is dropped while receiving a big file.
 
 ## Network
 - Room code lockouts count a whole IPv6 network (/64) as one address, so one machine can
