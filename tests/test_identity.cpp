@@ -21,6 +21,35 @@ static void check(bool condition, const std::string& what) {
 int main() {
     CryptoManager crypto;
     try {
+        std::cout << "End-to-end keys" << std::endl;
+        {
+            const std::vector<uint8_t> a = x25519_generate_private();
+            const std::vector<uint8_t> b = x25519_generate_private();
+            const std::vector<uint8_t> c = x25519_generate_private();
+            const std::vector<uint8_t> a_pub = x25519_public_from_private(a);
+            const std::vector<uint8_t> b_pub = x25519_public_from_private(b);
+            check(a.size() == 32 && a_pub.size() == 32 && a != b, "keys are 32 bytes and differ");
+            const std::vector<uint8_t> ab = e2e_shared_key(a, b_pub);
+            check(ab.size() == 32 && ab == e2e_shared_key(b, a_pub), "both sides get the same key");
+            check(ab != e2e_shared_key(c, a_pub), "a third person gets a different key");
+            bool refused = false;
+            try {
+                e2e_shared_key(a, std::vector<uint8_t>(32, 0));
+            } catch (const std::exception&) {
+                refused = true;
+            }
+            check(refused, "an all-zero public key is refused");
+            refused = false;
+            try {
+                e2e_shared_key(a, std::vector<uint8_t>(31, 1));
+            } catch (const std::exception&) {
+                refused = true;
+            }
+            check(refused, "a short public key is refused");
+            check(pair_safety_code(a_pub, b_pub) == pair_safety_code(b_pub, a_pub) &&
+                  pair_safety_code(a_pub, b_pub).size() == 24, "the pair's safety code is the same both ways");
+        }
+
         std::cout << "Identity keys" << std::endl;
         IdentityKey id = crypto.generate_identity();
         check(id.private_raw.size() == 32 && id.public_raw.size() == 32, "keys are 32 bytes");
