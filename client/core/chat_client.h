@@ -15,6 +15,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -116,7 +117,9 @@ public:
     // A direct message is sealed so that only the two people can read it, not
     // the server. Text over MAX_DIRECT_TEXT bytes is rejected (returns false,
     // nothing is sent). If the person's key has to be fetched first the
-    // message waits for it; a notice follows if they turn out to have none.
+    // message waits for it. It is then not sent, with a notice saying so, if
+    // they have no key or the key is not the one they had last time: the
+    // user is warned (on_peer_key) and can send again if they trust it.
     bool send_direct(const std::string& to, const std::string& text);
     // Text over MAX_TEXT_LEN bytes is rejected.
     bool send_broadcast(const std::string& text);
@@ -165,7 +168,7 @@ private:
     std::string my_name() const;
     std::string chat_scope() const;
     bool peer_key_from(const std::string& name, const std::vector<uint8_t>& pub, PeerKey* out);
-    void record_key(const std::string& name, const PeerKey& key);
+    bool record_key(const std::string& name, const PeerKey& key);
     bool ask_key(const std::string& name);
     bool wait_for_key(const std::string& name, PeerKey* out);
     void handle_key(const std::string& name, const std::string& key);
@@ -243,6 +246,10 @@ private:
     std::string my_name_;
     std::map<std::string, PeerKey> peer_keys_;
     std::map<std::string, std::vector<std::string>> waiting_;
+    std::set<std::string> key_changed_;  // names whose fetched key turned out different
+    // Held while a sealed message gets its number and goes out, so numbers
+    // reach the other side in order.
+    std::recursive_mutex seal_order_mutex_;
 };
 
 // Parses the server's "Online (N): a, b, c" reply. Names never contain spaces,

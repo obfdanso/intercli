@@ -460,6 +460,27 @@ std::vector<uint8_t> e2e_aad(char kind, const std::string& from, const std::stri
     return std::vector<uint8_t>(s.begin(), s.end());
 }
 
+std::string counter_bytes(uint64_t value) {
+    std::string out;
+    for (int i = 0; i < 8; ++i) {
+        out.push_back(static_cast<char>(value >> (8 * i)));
+    }
+    return out;
+}
+
+// Takes the number off the front of an opened message. False if it is missing.
+bool take_counter(std::string* plain, uint64_t* value) {
+    if (plain->size() < E2E_COUNTER_SIZE) {
+        return false;
+    }
+    *value = 0;
+    for (int i = 0; i < 8; ++i) {
+        *value |= static_cast<uint64_t>(static_cast<unsigned char>((*plain)[i])) << (8 * i);
+    }
+    plain->erase(0, E2E_COUNTER_SIZE);
+    return true;
+}
+
 } // namespace
 
 std::string ChatClient::my_name() const {
@@ -518,12 +539,13 @@ bool ChatClient::peer_key_from(const std::string& name, const std::vector<uint8_
     }
 }
 
-void ChatClient::record_key(const std::string& name, const PeerKey& key) {
+// True if this is not the key that name had last time.
+bool ChatClient::record_key(const std::string& name, const PeerKey& key) {
     {
         std::lock_guard<std::mutex> lock(e2e_mutex_);
         const auto it = peer_keys_.find(name);
         if (it != peer_keys_.end() && it->second.pub == key.pub) {
-            return;
+            return false;
         }
         if (it != peer_keys_.end() || peer_keys_.size() < kMaxPeerKeys) {
             peer_keys_[name] = key;
@@ -533,6 +555,7 @@ void ChatClient::record_key(const std::string& name, const PeerKey& key) {
     if (events_.on_peer_key) {
         events_.on_peer_key(name, seen == KeyStore::Seen::Changed);
     }
+    return seen == KeyStore::Seen::Changed;
 }
 
 bool ChatClient::ask_key(const std::string& name) {
@@ -566,6 +589,7 @@ bool ChatClient::request_key(const std::string& peer) {
 bool ChatClient::wait_for_key(const std::string& name, PeerKey* out) {
     std::unique_lock<std::mutex> lock(e2e_mutex_);
     if (peer_keys_.count(name) == 0) {
+        key_changed_.erase(name);
         if (waiting_.count(name) == 0) {
             waiting_[name];
             lock.unlock();
@@ -577,6 +601,11 @@ bool ChatClient::wait_for_key(const std::string& name, PeerKey* out) {
         key_arrived_.wait_for(lock, kKeyWait, [&] {
             return peer_keys_.count(name) > 0 || waiting_.count(name) == 0;
         });
+        // A key that is not the one they had before: the user has been
+        // warned, and nothing goes out until they try again.
+        if (key_changed_.erase(name) > 0) {
+            return false;
+        }
     }
     const auto it = peer_keys_.find(name);
     if (it == peer_keys_.end()) {
@@ -591,8 +620,13 @@ void ChatClient::handle_key(const std::string& name, const std::string& key) {
     PeerKey peer;
     const bool ok = key.size() == E2E_KEY_SIZE &&
                     peer_key_from(name, std::vector<uint8_t>(key.begin(), key.end()), &peer);
-    if (ok) {
-        record_key(name, peer);
+    // A different key than last time may be someone else under the name (or
+    // someone in between). The user is warned through on_peer_key, and what
+    // was waiting is not sent: sending again is how they say they trust it.
+    const bool changed = ok && record_key(name, peer);
+    if (changed) {
+        std::lock_guard<std::mutex> lock(e2e_mutex_);
+        key_changed_.insert(name);
     }
     // What was waiting goes out in the order it was written. The entry stays
     // until nothing is left, so a message sent meanwhile queues up behind.
@@ -612,7 +646,7 @@ void ChatClient::handle_key(const std::string& name, const std::string& key) {
             texts.swap(it->second);
         }
         for (const std::string& text : texts) {
-            if (ok) {
+            if (ok && !changed) {
                 send_sealed_direct(name, peer, text);
             } else {
                 dropped = true;
@@ -623,7 +657,9 @@ void ChatClient::handle_key(const std::string& name, const std::string& key) {
     if (dropped && events_.on_notice) {
         // The server knows no key for that name, so nobody by it has been
         // here. Nothing is ever sent unsealed instead.
-        events_.on_notice("No such user: " + name);
+        events_.on_notice(changed ? "Not sent: " + name + " has a different key than last time. "
+                                    "Check the safety code with them, then send again."
+                                  : "No such user: " + name);
     }
 }
 
@@ -632,8 +668,10 @@ bool ChatClient::send_sealed_direct(const std::string& to, const PeerKey& key, c
         const std::vector<uint8_t> mine = store_->public_key();
         ChatMessage msg = make_chat(ChatType::DIRECT);
         set_chat_field(msg.recipient, MAX_NAME_LEN, to);
+        std::lock_guard<std::recursive_mutex> order(seal_order_mutex_);
         set_chat_text(msg, std::string(mine.begin(), mine.end()) +
-                               seal_for(key.key, e2e_aad('m', my_name(), to), text));
+                               seal_for(key.key, e2e_aad('m', my_name(), to),
+                                        counter_bytes(store_->next_counter()) + text));
         return send_chat(msg);
     } catch (const std::exception&) {
         return false;
@@ -811,7 +849,13 @@ bool ChatClient::send_file(FileTarget target, const std::string& to, const std::
         put_number(head, seq, 4);
         put_number(head, total, 4);
         std::string piece;
+        std::unique_lock<std::recursive_mutex> order(seal_order_mutex_, std::defer_lock);
         if (seq == 0) {
+            if (sealed) {
+                // Numbered like a direct message, so the file can't be delivered twice.
+                order.lock();
+                piece = counter_bytes(store_->next_counter());
+            }
             put_number(piece, data.size(), 8);
             piece += name;
         } else {
@@ -870,6 +914,10 @@ void ChatClient::handle_file_chunk(const ChatMessage& msg, const std::string& fr
                 if (events_.on_notice) {
                     events_.on_notice("A file from " + from + " could not be read");
                 }
+                return;
+            }
+            uint64_t number = 0;
+            if (!take_counter(&payload, &number) || !store_->newer(sender.pub, number)) {
                 return;
             }
             record_key(from, sender);
@@ -1100,6 +1148,14 @@ void ChatClient::handle_chat(const ChatMessage& msg) {
             if (text.size() >= E2E_KEY_SIZE &&
                 peer_key_from(from, std::vector<uint8_t>(text.begin(), text.begin() + E2E_KEY_SIZE), &sender) &&
                 open_from(sender.key, e2e_aad('m', from, my_name()), text.substr(E2E_KEY_SIZE), &plain)) {
+                uint64_t number = 0;
+                if (!take_counter(&plain, &number) || !store_->newer(sender.pub, number)) {
+                    // Seen before (or older than what was): never shown twice.
+                    if (events_.on_notice) {
+                        events_.on_notice("A repeated private message from " + from + " was ignored");
+                    }
+                    break;
+                }
                 record_key(from, sender);
                 if (events_.on_direct) events_.on_direct(from, plain);
             } else if (events_.on_notice) {

@@ -43,10 +43,12 @@ constexpr size_t FILE_CHUNK_HEADER = 17;
 constexpr size_t FILE_CHUNK_DATA = MAX_TEXT_LEN - FILE_CHUNK_HEADER;
 constexpr size_t MAX_FILE_NAME_LEN = 255;
 // End-to-end encryption of direct messages: the sender's X25519 public key
-// travels with each one, and sealing adds a nonce and a tag.
+// travels with each one, sealing adds a nonce and a tag, and inside sits
+// a number that only goes up, so an old message cannot be delivered again.
 constexpr size_t E2E_KEY_SIZE = 32;
 constexpr size_t E2E_SEAL_OVERHEAD = IV_SIZE + GCM_TAG_SIZE;
-constexpr size_t MAX_DIRECT_TEXT = MAX_TEXT_LEN - E2E_KEY_SIZE - E2E_SEAL_OVERHEAD;
+constexpr size_t E2E_COUNTER_SIZE = 8;
+constexpr size_t MAX_DIRECT_TEXT = MAX_TEXT_LEN - E2E_KEY_SIZE - E2E_SEAL_OVERHEAD - E2E_COUNTER_SIZE;
 // Each peer rotates the key it sends with after this many messages sent.
 constexpr uint32_t KEY_ROTATION_INTERVAL = 10;
 
