@@ -23,6 +23,12 @@ jobs:
         run: cmake --build build -j 4
       - name: Test
         run: ctest --test-dir build --output-on-failure --timeout 600
+      - name: Show where the chat client test hangs
+        if: failure()
+        run: |
+          sudo apt-get install -y gdb
+          bash tests/run_with_server.sh build/server \
+            timeout -s INT 90 gdb -batch -ex run -ex 'thread apply all bt' build/test_chat_client || true
       - name: Package
         run: cd build && cpack
       - uses: actions/upload-artifact@v4
