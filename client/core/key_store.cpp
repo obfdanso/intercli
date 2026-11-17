@@ -99,7 +99,9 @@ void KeyStore::load() {
             }
         } else if (kind == "counter") {
             counter_ = number_from(a) + kCounterSkip;
-        } else if (kind == "mark" && a.size() == 64 && plain_word(a) && marks_.size() < kMaxPeers) {
+        } else if (kind == "floor") {
+            floor_ = number_from(a);
+        } else if (kind == "mark"&& a.size() == 64 && plain_word(a) && marks_.size() < kMaxPeers) {
             marks_[a] = number_from(b);
         } else if (kind == "peer" && plain_word(a) && plain_word(b) && peers_.size() < kMaxPeers) {
             const std::vector<uint8_t> key = key_from_hex(c);
@@ -143,6 +145,7 @@ void KeyStore::save_locked() {
             out << "identity " << bytes_to_hex(private_) << '\n';
         }
         out << "counter " << counter_ << '\n';
+        out << "floor " << floor_ << '\n';
         for (const auto& peer : peers_) {
             out << "peer " << peer.first << ' ' << bytes_to_hex(peer.second) << '\n';
         }
@@ -183,12 +186,18 @@ bool KeyStore::newer(const std::vector<uint8_t>& sender_key, uint64_t counter) {
     std::lock_guard<std::mutex> lock(mutex_);
     const std::string id = bytes_to_hex(sender_key);
     const auto it = marks_.find(id);
-    if (it != marks_.end() && counter <= it->second) {
+    if (counter <= floor_ || (it != marks_.end() && counter <= it->second)) {
         return false;
     }
     if (it == marks_.end() && marks_.size() >= kMaxPeers) {
-        // Full: the oldest-looking entry makes room, so newcomers still count.
-        marks_.erase(marks_.begin());
+        // Full: the sender heard from longest ago makes room, so newcomers
+        // still count. Their mark becomes a floor for everyone, or a flood of
+        // throwaway keys could push a real sender out and let their old
+        // messages pass again. Numbers are times, so new messages are above it.
+        const auto oldest = std::min_element(marks_.begin(), marks_.end(),
+            [](const auto& x, const auto& y) { return x.second < y.second; });
+        floor_ = (std::max)(floor_, oldest->second);
+        marks_.erase(oldest);
     }
     marks_[id] = counter;
     save_soon_locked();

@@ -78,6 +78,27 @@ int main() {
             check(store.next_counter() > last, "our numbers keep going up after a restart");
             check(!store.newer(ama, 9) && store.newer(ama, 10), "what was seen is remembered after a restart");
         }
+        {
+            // Flooding with throwaway keys must not make room for a real
+            // sender's old message to pass again.
+            std::remove(path.c_str());
+            std::vector<uint8_t> real(32, 0);  // sorts first, so it is the first pushed out
+            {
+                KeyStore store(path);
+                check(store.newer(real, 1000), "a real sender's message passes");
+                for (int i = 1; i <= 5000; ++i) {
+                    std::vector<uint8_t> junk(32, 0xEE);
+                    junk[0] = static_cast<uint8_t>(i >> 8);
+                    junk[1] = static_cast<uint8_t>(i);
+                    store.newer(junk, 2000 + i);
+                }
+                check(!store.newer(real, 1000) && !store.newer(real, 500),
+                      "after a flood of other keys, the real sender's old message still does not pass");
+                check(store.newer(real, 100000), "a new message from them still does");
+            }
+            KeyStore store(path);
+            check(!store.newer(std::vector<uint8_t>(32, 0x01), 1500), "the floor is remembered after a restart");
+        }
         KeyStore a, b;
         check(a.public_key() != b.public_key(), "without a file every store has its own key");
     } catch (const std::exception& e) {

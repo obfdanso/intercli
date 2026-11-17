@@ -55,6 +55,7 @@ private:
     std::map<std::string, std::vector<uint8_t>> peers_;  // "chat name" -> key
     uint64_t counter_ = 0;                  // the last number we used
     std::map<std::string, uint64_t> marks_;  // sender key (hex) -> highest number seen
+    uint64_t floor_ = 0;  // highest number of a sender pushed out of marks_; nothing at or below it passes
     bool unsaved_ = false;
     std::chrono::steady_clock::time_point last_save_{};
 };
