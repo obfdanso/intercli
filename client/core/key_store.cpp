@@ -1,6 +1,7 @@
 #include "key_store.h"
 #include "../../crypto/crypto_utils.h"
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -11,6 +12,18 @@ namespace {
 
 // People remembered at most; past this, new ones are not written down.
 constexpr size_t kMaxPeers = 5000;
+// Numbers are written down every couple of seconds, not per message. After a
+// restart ours skip ahead by more than could have been used in between.
+constexpr std::chrono::seconds kSaveEvery(2);
+constexpr uint64_t kCounterSkip = 10000000;
+
+uint64_t number_from(const std::string& word) {
+    try {
+        return word.empty() || word.size() > 20 ? 0 : std::stoull(word);
+    } catch (const std::exception&) {
+        return 0;
+    }
+}
 
 bool plain_word(const std::string& word) {
     if (word.empty() || word.size() > 128) {
@@ -47,17 +60,35 @@ KeyStore::KeyStore(const std::string& path) : path_(path) {
     }
 }
 
+KeyStore::KeyStore(const std::string& path, const std::vector<uint8_t>& private_key)
+    : path_(path), key_in_file_(false) {
+    load();
+    try {
+        public_ = x25519_public_from_private(private_key);
+        private_ = private_key;
+    } catch (const std::exception&) {
+        // Not a usable key: one that lasts this run, never written down.
+        private_ = x25519_generate_private();
+        public_ = x25519_public_from_private(private_);
+    }
+}
+
 void KeyStore::load() {
     if (path_.empty()) {
         return;
     }
-    std::ifstream in(path_);
+    std::ifstream in;
+    try {
+        in.open(std::filesystem::u8path(path_));
+    } catch (const std::exception&) {
+        return;
+    }
     std::string line;
     while (std::getline(in, line)) {
         std::istringstream words(line);
         std::string kind, a, b, c;
         words >> kind >> a >> b >> c;
-        if (kind == "identity") {
+        if (kind == "identity" && key_in_file_) {
             const std::vector<uint8_t> key = key_from_hex(a);
             try {
                 if (!key.empty()) {
@@ -66,6 +97,10 @@ void KeyStore::load() {
                 }
             } catch (const std::exception&) {
             }
+        } else if (kind == "counter") {
+            counter_ = number_from(a) + kCounterSkip;
+        } else if (kind == "mark" && a.size() == 64 && plain_word(a) && marks_.size() < kMaxPeers) {
+            marks_[a] = number_from(b);
         } else if (kind == "peer" && plain_word(a) && plain_word(b) && peers_.size() < kMaxPeers) {
             const std::vector<uint8_t> key = key_from_hex(c);
             if (!key.empty()) {
@@ -77,12 +112,19 @@ void KeyStore::load() {
 
 // Written to a second file first and swapped in, so a crash part-way never
 // leaves a half-written key behind.
-void KeyStore::save_locked() const {
+void KeyStore::save_locked() {
+    unsaved_ = false;
+    last_save_ = std::chrono::steady_clock::now();
     if (path_.empty()) {
         return;
     }
     std::error_code ignored;
-    const std::filesystem::path target = std::filesystem::u8path(path_);
+    std::filesystem::path target;
+    try {
+        target = std::filesystem::u8path(path_);
+    } catch (const std::exception&) {
+        return;
+    }
     if (target.has_parent_path()) {
         std::filesystem::create_directories(target.parent_path(), ignored);
     }
@@ -97,15 +139,60 @@ void KeyStore::save_locked() const {
         // user's own folders are already private).
         std::filesystem::permissions(temp, std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
                                      ignored);
-        out << "identity " << bytes_to_hex(private_) << '\n';
+        if (key_in_file_) {
+            out << "identity " << bytes_to_hex(private_) << '\n';
+        }
+        out << "counter " << counter_ << '\n';
         for (const auto& peer : peers_) {
             out << "peer " << peer.first << ' ' << bytes_to_hex(peer.second) << '\n';
+        }
+        for (const auto& mark : marks_) {
+            out << "mark " << mark.first << ' ' << mark.second << '\n';
         }
         if (!out.flush()) {
             return;
         }
     }
     std::filesystem::rename(temp, target, ignored);
+}
+
+void KeyStore::save_soon_locked() {
+    unsaved_ = true;
+    if (std::chrono::steady_clock::now() - last_save_ > kSaveEvery) {
+        save_locked();
+    }
+}
+
+KeyStore::~KeyStore() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (unsaved_) {
+        save_locked();
+    }
+}
+
+uint64_t KeyStore::next_counter() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const uint64_t now = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count());
+    counter_ = (std::max)(counter_ + 1, now);
+    save_soon_locked();
+    return counter_;
+}
+
+bool KeyStore::newer(const std::vector<uint8_t>& sender_key, uint64_t counter) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const std::string id = bytes_to_hex(sender_key);
+    const auto it = marks_.find(id);
+    if (it != marks_.end() && counter <= it->second) {
+        return false;
+    }
+    if (it == marks_.end() && marks_.size() >= kMaxPeers) {
+        // Full: the oldest-looking entry makes room, so newcomers still count.
+        marks_.erase(marks_.begin());
+    }
+    marks_[id] = counter;
+    save_soon_locked();
+    return true;
 }
 
 std::vector<uint8_t> KeyStore::private_key() const {

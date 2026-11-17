@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 
 using namespace SecureComm;
@@ -48,6 +49,34 @@ int main() {
             check(store.public_key().size() == 32 && store.public_key() != first_public,
                   "a damaged file gets a fresh key");
             check(store.known("chat1", "ama").empty(), "damaged lines are skipped");
+        }
+        {
+            const std::vector<uint8_t> given = x25519_generate_private();
+            {
+                KeyStore store(path, given);
+                check(store.private_key() == given, "a key kept elsewhere is used as given");
+                store.remember("chat1", "kofi", ama);
+            }
+            std::ifstream in(path);
+            const std::string all((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            check(all.find("identity") == std::string::npos && all.find("kofi") != std::string::npos,
+                  "and never written to the file, which still remembers people");
+        }
+        {
+            std::remove(path.c_str());
+            uint64_t last = 0;
+            {
+                KeyStore store(path);
+                const uint64_t one = store.next_counter();
+                last = store.next_counter();
+                check(last > one, "message numbers go up");
+                check(store.newer(ama, 5) && store.newer(ama, 9), "a higher number from a sender passes");
+                check(!store.newer(ama, 9) && !store.newer(ama, 7), "the same or a lower one does not");
+                check(store.newer(ama_new, 7), "each sender is counted separately");
+            }
+            KeyStore store(path);
+            check(store.next_counter() > last, "our numbers keep going up after a restart");
+            check(!store.newer(ama, 9) && store.newer(ama, 10), "what was seen is remembered after a restart");
         }
         KeyStore a, b;
         check(a.public_key() != b.public_key(), "without a file every store has its own key");
