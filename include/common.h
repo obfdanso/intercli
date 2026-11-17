@@ -42,6 +42,11 @@ constexpr size_t MAX_FILE_SIZE = 8 * 1024 * 1024;
 constexpr size_t FILE_CHUNK_HEADER = 17;
 constexpr size_t FILE_CHUNK_DATA = MAX_TEXT_LEN - FILE_CHUNK_HEADER;
 constexpr size_t MAX_FILE_NAME_LEN = 255;
+// End-to-end encryption of direct messages: the sender's X25519 public key
+// travels with each one, and sealing adds a nonce and a tag.
+constexpr size_t E2E_KEY_SIZE = 32;
+constexpr size_t E2E_SEAL_OVERHEAD = IV_SIZE + GCM_TAG_SIZE;
+constexpr size_t MAX_DIRECT_TEXT = MAX_TEXT_LEN - E2E_KEY_SIZE - E2E_SEAL_OVERHEAD;
 // Each peer rotates the key it sends with after this many messages sent.
 constexpr uint32_t KEY_ROTATION_INTERVAL = 10;
 
@@ -104,6 +109,10 @@ enum class ChatType : uint8_t {
     // sender field: "delivered", or "queued" (they are away; kept for them).
     // From a client, to the person in the recipient field: "read".
     RECEIPT       = 0x10,
+    // People's public keys for end-to-end encryption. A client asks for the
+    // key of the person in the recipient field; the server answers with that
+    // person in the sender field and the key as the text (empty: no key).
+    KEY           = 0x11,
 };
 
 // The four structs below travel on the wire as raw bytes, so every compiler
