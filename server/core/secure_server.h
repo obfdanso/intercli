@@ -36,6 +36,9 @@ struct ServerOptions {
     // How long a connection may stay without picking a name, once the
     // handshake is done. Long enough for someone typing one at a prompt.
     std::chrono::seconds name_timeout = std::chrono::seconds(300);
+    // Bans carried over from an earlier run (see SecureServer::bans).
+    std::vector<std::string> banned_names;
+    std::vector<std::string> banned_addresses;
     // The server's long-term identity (32-byte Ed25519 private key). Empty: a
     // temporary identity is made for this run.
     std::vector<uint8_t> identity_private;
@@ -67,6 +70,14 @@ public:
     // Removes someone and keeps them out until the server stops: the name is
     // refused, and so is their address unless it is this PC's own.
     bool ban(const std::string& name);
+    // Who is banned now, to be kept and handed to the next run's options.
+    struct Bans {
+        std::vector<std::string> names;
+        std::vector<std::string> addresses;
+    };
+    Bans bans() const;
+    // Lets everyone banned back in.
+    void clear_bans();
     // Changes the room code for whoever joins from now on; people already in
     // the chat stay. False if the server was started without a room code, or
     // the new code is empty.

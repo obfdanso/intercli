@@ -319,6 +319,8 @@ struct SecureServer::Impl {
 
     explicit Impl(ServerOptions options)
         : options_(std::move(options)), server_socket_(-1), running_(false) {
+        banned_names_.insert(options_.banned_names.begin(), options_.banned_names.end());
+        banned_addresses_.insert(options_.banned_addresses.begin(), options_.banned_addresses.end());
 #ifdef _WIN32
         // Initialize Winsock
         WSADATA wsaData;
@@ -790,6 +792,18 @@ struct SecureServer::Impl {
             }
         }
         return remove_person(name, reason);
+    }
+
+    SecureServer::Bans bans() {
+        std::lock_guard<std::mutex> lock(admin_mutex_);
+        return {std::vector<std::string>(banned_names_.begin(), banned_names_.end()),
+                std::vector<std::string>(banned_addresses_.begin(), banned_addresses_.end())};
+    }
+
+    void clear_bans() {
+        std::lock_guard<std::mutex> lock(admin_mutex_);
+        banned_names_.clear();
+        banned_addresses_.clear();
     }
 
     bool banned_name(const std::string& name) {
@@ -1793,6 +1807,14 @@ bool SecureServer::kick(const std::string& name) {
 
 bool SecureServer::ban(const std::string& name) {
     return impl_->ban(name);
+}
+
+SecureServer::Bans SecureServer::bans() const {
+    return impl_->bans();
+}
+
+void SecureServer::clear_bans() {
+    impl_->clear_bans();
 }
 
 bool SecureServer::set_room_code(const std::string& code) {
