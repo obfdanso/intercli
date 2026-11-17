@@ -138,6 +138,12 @@ public:
     // or the name can't be a room's.
     Q_INVOKABLE bool joinRoom(const QString& name);
     Q_INVOKABLE void leaveRoom(const QString& name);
+    // Sends a file (up to 8 MB) to the current conversation. False when
+    // offline or the file can't be read or is too big; the reason is shown
+    // in the conversation.
+    Q_INVOKABLE bool sendFile(const QUrl& url);
+    // Where received files are saved (default: Downloads/intercli).
+    void setDownloadDirForTests(const QString& dir) { download_dir_ = dir; }
     Q_INVOKABLE void rotateKey();
     Q_INVOKABLE void reconnect();
     Q_INVOKABLE void signOut();
@@ -192,7 +198,9 @@ private:
                    const QString& hostError = QString());
     MessageModel* modelFor(const QString& id);
     void addRow(const QString& conversation, MessageModel::Kind kind, const QString& sender,
-                const QString& text, bool persist);
+                const QString& text, bool persist, const QString& file = QString());
+    void onFile(const QString& from, SecureComm::FileTarget target, const QString& room, const QString& name,
+                const QByteArray& data);
     void loadSavedHistory();
     bool saving() const;
 
@@ -226,6 +234,7 @@ private:
     QHash<QString, MessageModel*> models_;
     QString current_;
     QString last_target_;
+    QString download_dir_;
     QStringList rooms_;     // rooms we are in, without the '#'; joined again after a reconnect
     QString pending_room_;  // a room the user just asked to join: opened once the server agrees
     bool window_active_ = true;

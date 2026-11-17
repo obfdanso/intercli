@@ -1,5 +1,7 @@
 #include "message_model.h"
 
+#include <QUrl>
+
 namespace Intercli {
 
 namespace {
@@ -45,6 +47,7 @@ QVariant MessageModel::data(const QModelIndex& index, int role) const {
         case LastInRunRole: return !continuesRun(row + 1);
         case ShowSenderRole: return is_everyone_ && e.kind == Incoming && !continuesRun(row);
         case ShowTimestampRole: return showsTimestamp(row);
+        case FileRole: return e.file.isEmpty() ? QString() : QUrl::fromLocalFile(e.file).toString();
         default: return {};
     }
 }
@@ -60,6 +63,7 @@ QHash<int, QByteArray> MessageModel::roleNames() const {
         {LastInRunRole, "lastInRun"},
         {ShowSenderRole, "showSender"},
         {ShowTimestampRole, "showTimestamp"},
+        {FileRole, "file"},
     };
 }
 

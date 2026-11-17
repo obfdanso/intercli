@@ -30,6 +30,7 @@ public:
         LastInRunRole,
         ShowSenderRole,
         ShowTimestampRole,
+        FileRole,  // a file URL when the message is a file on this PC, else empty
     };
 
     explicit MessageModel(bool isEveryone, QObject* parent = nullptr);
@@ -65,6 +66,7 @@ struct ChatEntry {
     QString sender;
     QString text;
     QDateTime time;
+    QString file;  // local path, for a file sent or received in this session
 };
 
 } // namespace Intercli

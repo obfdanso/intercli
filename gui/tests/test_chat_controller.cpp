@@ -185,6 +185,46 @@ private slots:
         }
     }
 
+    void file_reaches_the_other_person() {
+        ChatController fifi, fred;
+        QTemporaryDir downloads, source;
+        fred.setDownloadDirForTests(downloads.path());
+        fifi.signIn("127.0.0.1", SecureComm::DEFAULT_PORT, "fifi");
+        fred.signIn("127.0.0.1", SecureComm::DEFAULT_PORT, "fred");
+        QTRY_COMPARE_WITH_TIMEOUT(fifi.state(), ChatController::Online, kWait);
+        QTRY_COMPARE_WITH_TIMEOUT(fred.state(), ChatController::Online, kWait);
+
+        QByteArray contents;
+        for (int i = 0; i < 20000; ++i) {
+            contents.append(static_cast<char>(i % 251));
+        }
+        const QString path = source.path() + "/notes.bin";
+        QFile original(path);
+        QVERIFY(original.open(QIODevice::WriteOnly));
+        original.write(contents);
+        original.close();
+
+        fifi.setCurrentConversation("fred");
+        QVERIFY(!fifi.sendFile(QUrl::fromLocalFile(source.path() + "/missing.bin")));
+        QVERIFY(fifi.sendFile(QUrl::fromLocalFile(path)));
+
+        // It is saved under its own name, byte for byte, and shown in the conversation.
+        const QString saved = downloads.path() + "/notes.bin";
+        QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(saved), kWait);
+        QFile copy(saved);
+        QVERIFY(copy.open(QIODevice::ReadOnly));
+        QCOMPARE(copy.readAll(), contents);
+        fred.setCurrentConversation("fifi");
+        MessageModel* shown = fred.messages();
+        QTRY_VERIFY_WITH_TIMEOUT(shown->count() > 0, kWait);
+        QVERIFY(shown->entryAt(shown->count() - 1).text.contains("notes.bin"));
+        QCOMPARE(shown->entryAt(shown->count() - 1).file, saved);
+
+        // A second file of the same name does not replace the first.
+        QVERIFY(fifi.sendFile(QUrl::fromLocalFile(path)));
+        QTRY_VERIFY_WITH_TIMEOUT(QFile::exists(downloads.path() + "/notes (1).bin"), kWait);
+    }
+
     void taken_name_reports_name_error() {
         ChatController other;
         other.signIn("127.0.0.1", SecureComm::DEFAULT_PORT, "bob");

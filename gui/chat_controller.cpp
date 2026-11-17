@@ -5,6 +5,12 @@
 #include "../crypto/crypto_utils.h"
 
 #include <QDateTime>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QLocale>
+#include <QStandardPaths>
+#include <QUrl>
 #include <QSettings>
 #include <QClipboard>
 #include <QNetworkInterface>
@@ -21,6 +27,12 @@ QString qs(const std::string& s) {
 
 std::string ss(const QString& s) {
     return s.toUtf8().toStdString();
+}
+
+// How a file shows in a conversation: a paperclip, its name and its size.
+QString fileLabel(const QString& name, qint64 size) {
+    return QString::fromUtf8("\xF0\x9F\x93\x8E ") + name + QStringLiteral(" (") + QLocale().formattedDataSize(size) +
+           QLatin1Char(')');
 }
 
 } // namespace
@@ -168,6 +180,11 @@ std::shared_ptr<SecureComm::ChatClient> ChatController::makeClient() {
         post([this, n, joined, raw] { onPresence(qs(n), joined, qs(raw)); });
     };
     ev.on_notice = [this, post](const std::string& t) { post([this, t] { onNotice(qs(t)); }); };
+    ev.on_file = [this, post](const std::string& f, SecureComm::FileTarget target, const std::string& room,
+                              const std::string& name, const std::vector<uint8_t>& data) {
+        const QByteArray bytes(reinterpret_cast<const char*>(data.data()), static_cast<qsizetype>(data.size()));
+        post([this, f, target, room, name, bytes] { onFile(qs(f), target, qs(room), qs(name), bytes); });
+    };
     ev.on_room_message = [this, post](const std::string& room, const std::string& f, const std::string& t) {
         post([this, room, f, t] { onRoomMessage(qs(room), qs(f), qs(t)); });
     };
@@ -704,8 +721,9 @@ void ChatController::loadOlder() {
 }
 
 void ChatController::addRow(const QString& conversation, MessageModel::Kind kind, const QString& sender,
-                            const QString& text, bool persist) {
+                            const QString& text, bool persist, const QString& file) {
     ChatEntry e;
+    e.file = file;
     e.kind = kind;
     e.sender = sender;
     e.text = text;
@@ -759,6 +777,101 @@ void ChatController::onPresence(const QString& name, bool joined, const QString&
 
 void ChatController::onNotice(const QString& text) {
     addRow(last_target_, MessageModel::System, QString(), text, false);
+}
+
+bool ChatController::sendFile(const QUrl& url) {
+    if (state_ != Online || !client_) {
+        return false;
+    }
+    const QString path = url.isLocalFile() ? url.toLocalFile() : url.toString();
+    QFile file(path);
+    const QString name = QFileInfo(path).fileName();
+    QString problem;
+    if (!QFileInfo(path).isFile() || !file.open(QIODevice::ReadOnly)) {
+        problem = QStringLiteral("Couldn't open that file");
+    } else if (file.size() > static_cast<qint64>(SecureComm::MAX_FILE_SIZE)) {
+        problem = QStringLiteral("Files can be up to 8 MB");
+    } else if (name.toUtf8().size() > static_cast<qsizetype>(SecureComm::MAX_FILE_NAME_LEN)) {
+        problem = QStringLiteral("That file's name is too long");
+    }
+    if (!problem.isEmpty()) {
+        addRow(current_, MessageModel::System, QString(), problem, false);
+        return false;
+    }
+    const QByteArray bytes = file.readAll();
+    const bool room = current_.startsWith(QLatin1Char('#'));
+    const auto target = current_.isEmpty() ? SecureComm::FileTarget::Everyone
+                      : room               ? SecureComm::FileTarget::Room
+                                           : SecureComm::FileTarget::Direct;
+    const std::string to = ss(room ? current_.mid(1) : current_);
+    const QString label = fileLabel(name, bytes.size());
+    last_target_ = current_;
+    addRow(current_, MessageModel::Outgoing, my_name_, label, true, path);
+    list_->touch(current_, QStringLiteral("You: ") + label, QDateTime::currentDateTime(), false);
+
+    // Sending blocks for as long as the pieces take, so it gets a thread of its
+    // own. The thread keeps the connection alive through its own reference and
+    // ends early if the connection is closed; it is joined like a retired connect.
+    reapRetired();
+    auto done = std::make_shared<std::atomic<bool>>(false);
+    auto client = client_;
+    const quint64 gen = generation_;
+    const QString conversation = current_;
+    const std::string file_name = ss(name);
+    const std::vector<uint8_t> data(bytes.begin(), bytes.end());
+    retired_.push_back(Retired{std::thread([this, client, target, to, file_name, data, done, gen, conversation, name] {
+        const bool ok = client->send_file(target, to, file_name, data);
+        *done = true;
+        QMetaObject::invokeMethod(this, [this, ok, gen, conversation, name] {
+            if (!ok && gen == generation_) {
+                addRow(conversation, MessageModel::System, QString(), QStringLiteral("Couldn't send ") + name, false);
+            }
+        }, Qt::QueuedConnection);
+    }), done});
+    return true;
+}
+
+void ChatController::onFile(const QString& from, SecureComm::FileTarget target, const QString& room,
+                            const QString& name, const QByteArray& data) {
+    const QString conversation = target == SecureComm::FileTarget::Direct ? from
+                               : target == SecureComm::FileTarget::Room   ? QLatin1Char('#') + room
+                                                                          : QString();
+    // The name is the sender's choice: keep only a plain file name, so nothing
+    // can be written outside the downloads folder or over an existing file.
+    QString safe = name.section(QLatin1Char('/'), -1).section(QLatin1Char('\\'), -1);
+    for (QChar& c : safe) {
+        if (c.unicode() < 0x20 || QStringLiteral(":*?\"<>|").contains(c)) {
+            c = QLatin1Char('_');
+        }
+    }
+    safe = safe.trimmed();
+    if (safe.isEmpty() || safe == QStringLiteral(".") || safe == QStringLiteral("..")) {
+        safe = QStringLiteral("file");
+    }
+    const QString dir = download_dir_.isEmpty()
+        ? QStandardPaths::writableLocation(QStandardPaths::DownloadLocation) + QStringLiteral("/intercli")
+        : download_dir_;
+    QDir().mkpath(dir);
+    const QFileInfo wanted(dir + QLatin1Char('/') + safe);
+    QString path = wanted.filePath();
+    for (int n = 1; QFileInfo::exists(path) && n < 1000; ++n) {
+        path = dir + QLatin1Char('/') + wanted.completeBaseName() + QStringLiteral(" (%1)").arg(n) +
+               (wanted.suffix().isEmpty() ? QString() : QLatin1Char('.') + wanted.suffix());
+    }
+    QFile out(path);
+    const bool saved = !QFileInfo::exists(path) && out.open(QIODevice::WriteOnly) && out.write(data) == data.size();
+    out.close();
+
+    const QString label = fileLabel(safe, data.size());
+    if (saved) {
+        addRow(conversation, MessageModel::Incoming, from, label, true, path);
+    } else {
+        addRow(conversation, MessageModel::Incoming, from, label + QStringLiteral(" (couldn't be saved)"), true);
+    }
+    const bool unseen = conversation != current_ || !window_active_;
+    const QString preview = target == SecureComm::FileTarget::Direct ? label : from + QStringLiteral(": ") + label;
+    list_->touch(conversation, preview, QDateTime::currentDateTime(), unseen);
+    emit messageArrived(conversation);
 }
 
 bool ChatController::joinRoom(const QString& name) {
