@@ -25,11 +25,17 @@ but should be better.
 
 ## Offline delivery and receipts
 - Names aren't accounts: a message kept for someone who is away goes to whoever next
-  joins under that name. Needs per-user identity keys.
+  joins under that name from the same address (from another address it is thrown away,
+  so a changed address loses the messages). Needs per-user identity keys.
 - Kept messages live in the server's memory: they are lost when the chat ends, capped at
-  50 per person, and dropped after 24 hours.
+  50 per person (10 from any one sender), and dropped after 24 hours.
 - Kept messages arrive without their original time.
 - Read receipts can't be switched off, and exist only for direct messages.
+
+## Server
+- One event loop serves every connection. The key exchange for a new connection runs in
+  that loop, so many people joining at the same moment wait on each other.
+- Never measured with many clients (tests use a handful).
 
 ## Network
 - Room code lockouts count a whole IPv6 network (/64) as one address, so one machine can

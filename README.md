@@ -374,7 +374,7 @@ you would an email attachment.
 ### Away messages and receipts
 
 A direct message to someone who has left the chat is kept by the host and handed over
-when they join again under the same name (up to 50 per person, for up to a day, and only
+when they join again under the same name from the same address (up to 50 per person, for up to a day, and only
 while the chat keeps running). Under your latest direct message the app shows whether it
 was delivered, read, or is being kept for someone who is away. See `TODO.md` for the
 limits, the main one being that names aren't accounts.
