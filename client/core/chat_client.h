@@ -43,6 +43,9 @@ struct ChatEvents {
     // whatever the sender chose: clean it before using it as a file name.
     std::function<void(const std::string& from, FileTarget target, const std::string& room,
                        const std::string& name, const std::vector<uint8_t>& data)> on_file;
+    // What became of our direct messages to peer: "delivered", "queued" (they
+    // are away and will get them when back) or "read".
+    std::function<void(const std::string& peer, const std::string& what)> on_receipt;
     std::function<void(const std::string& text)> on_notice;
     std::function<void(const std::string& text)> on_server_error;
     std::function<void()> on_send_key_rotated;
@@ -98,6 +101,8 @@ public:
     bool send_direct(const std::string& to, const std::string& text);
     bool send_broadcast(const std::string& text);
     bool request_roster();
+    // Tells peer that their direct messages have been read.
+    bool send_read(const std::string& peer);
 
     // Named rooms. Joining a room that doesn't exist creates it; our own
     // on_room_event (joined) is the confirmation. A problem comes as a notice.

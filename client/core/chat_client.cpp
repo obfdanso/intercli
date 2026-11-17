@@ -443,6 +443,16 @@ bool ChatClient::request_roster() {
     return send_chat(make_chat(ChatType::WHO));
 }
 
+bool ChatClient::send_read(const std::string& peer) {
+    if (!is_valid_name(peer)) {
+        return false;
+    }
+    ChatMessage msg = make_chat(ChatType::RECEIPT);
+    set_chat_field(msg.recipient, MAX_NAME_LEN, peer);
+    set_chat_text(msg, "read");
+    return send_chat(msg, true);
+}
+
 bool ChatClient::join_room(const std::string& room) {
     if (!is_valid_name(room)) {
         return false;
@@ -776,6 +786,9 @@ void ChatClient::handle_chat(const ChatMessage& msg) {
             break;
         case ChatType::NOTICE:
             if (events_.on_notice) events_.on_notice(text);
+            break;
+        case ChatType::RECEIPT:
+            if (events_.on_receipt) events_.on_receipt(from, text);
             break;
         case ChatType::FILE_CHUNK:
             handle_file_chunk(msg, from, text);

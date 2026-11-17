@@ -97,8 +97,16 @@ private:
             std::cout << reason << std::endl;
             answer_registration(false);
         };
-        ev.on_direct = [](const std::string& from, const std::string& text) {
+        ev.on_direct = [this](const std::string& from, const std::string& text) {
             print_incoming("[" + from + " -> you] " + text);
+            client_.send_read(from);  // on screen is as read as a terminal gets
+        };
+        ev.on_receipt = [](const std::string& peer, const std::string& what) {
+            if (what == "queued") {
+                print_incoming("*** " + peer + " is away and will get your message when back ***");
+            } else if (what == "read") {
+                print_incoming("*** " + peer + " read your messages ***");
+            }
         };
         ev.on_broadcast = [](const std::string& from, const std::string& text) {
             print_incoming("[" + from + "] " + text);
