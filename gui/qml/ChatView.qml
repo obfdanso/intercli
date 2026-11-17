@@ -149,6 +149,15 @@ Item {
             anchors.bottom: parent.bottom
             placeholder: root.everyone ? "Message everyone" : "Message " + root.peer
         }
+        // Drop files anywhere on the conversation to send them.
+        DropArea {
+            anchors.fill: parent
+            enabled: Chat.state === Chat.Online
+            onDropped: (drop) => {
+                for (let i = 0; i < drop.urls.length; ++i)
+                    Chat.sendFile(drop.urls[i])
+            }
+        }
     }
 
     Connections {

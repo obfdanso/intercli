@@ -9,6 +9,8 @@ Item {
     required property int kind          // 0 incoming, 1 outgoing, 2 system
     required property string sender
     required property string text
+    required property string file       // a file URL when the message is a file on this PC
+    readonly property bool picture: /\.(png|jpe?g|gif|bmp|webp)$/i.test(file)
     required property var time
     required property bool firstInRun
     required property bool lastInRun
@@ -72,8 +74,8 @@ Item {
             Rectangle {
                 id: bubble
                 x: root.kind === 1 ? parent.width - width : 0
-                width: Math.min(body.implicitWidth, root.maxBubbleWidth - 24) + 24
-                height: body.height + 14
+                width: Math.max(Math.min(body.implicitWidth, root.maxBubbleWidth - 24), preview.width) + 24
+                height: body.y + body.height + 7
                 radius: Theme.radiusBubble
                 color: root.kind === 1 ? Theme.accent : Theme.raised2
 
@@ -102,10 +104,34 @@ Item {
                     color: parent.color
                 }
 
+                // A picture is shown; any file opens in its usual program when clicked.
+                Image {
+                    id: preview
+                    visible: root.picture
+                    x: 12
+                    y: 7
+                    source: root.picture ? root.file : ""
+                    asynchronous: true
+                    cache: false
+                    sourceSize.width: 480
+                    fillMode: Image.PreserveAspectFit
+                    width: !root.picture ? 0 : Math.min(240, root.maxBubbleWidth - 24)
+                    height: !root.picture ? 0
+                          : status === Image.Ready ? width * implicitHeight / Math.max(1, implicitWidth) : 120
+                }
+                MouseArea {
+                    visible: root.file.length > 0
+                    anchors.fill: root.picture ? preview : body
+                    cursorShape: Qt.PointingHandCursor
+                    Accessible.role: Accessible.Button
+                    Accessible.name: "Open file"
+                    onClicked: Qt.openUrlExternally(root.file)
+                    z: 1
+                }
                 TextEdit {
                     id: body
                     x: 12
-                    y: 7
+                    y: 7 + (root.picture ? preview.height + 6 : 0)
                     width: Math.min(implicitWidth, root.maxBubbleWidth - 24)
                     readOnly: true
                     selectByMouse: true
