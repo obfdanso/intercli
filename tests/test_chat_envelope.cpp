@@ -17,6 +17,22 @@ static void check(bool condition, const std::string& what) {
     }
 }
 
+static void file_name_tests() {
+    std::cout << "File names from other people" << std::endl;
+    check(safe_file_name("photo.png") == "photo.png", "an ordinary name is kept");
+    check(safe_file_name("../../etc/passwd") == "passwd", "folders are dropped");
+    check(safe_file_name("C:\\Windows\\win.ini") == "win.ini", "Windows folders are dropped");
+    check(safe_file_name("..") == "file" && safe_file_name("") == "file" && safe_file_name(" . ") == "file",
+          "a name with nothing left becomes file");
+    check(safe_file_name("a<b>:c?.txt") == "a_b__c_.txt", "characters Windows refuses are replaced");
+    check(safe_file_name("notes.txt. ") == "notes.txt", "trailing dots and spaces are dropped");
+    check(safe_file_name("CON") == "_CON" && safe_file_name("nul.txt") == "_nul.txt" &&
+          safe_file_name("com1.log") == "_com1.log" && safe_file_name("LPT9") == "_LPT9",
+          "Windows device names are renamed");
+    check(safe_file_name("console.txt") == "console.txt" && safe_file_name("comet.png") == "comet.png",
+          "names that only start like a device are kept");
+}
+
 int main() {
     std::cout << "Envelope size" << std::endl;
     check(sizeof(ChatMessage) <= MAX_MESSAGE_SIZE - GCM_TAG_SIZE,
@@ -74,6 +90,8 @@ int main() {
     set_chat_field(longname.recipient, MAX_NAME_LEN, std::string(100, 'z'));
     check(get_chat_field(longname.recipient, MAX_NAME_LEN).size() == MAX_NAME_LEN - 1,
           "over-long field is clamped and stays NUL-terminated");
+
+    file_name_tests();
 
     if (failures == 0) {
         std::cout << "All chat envelope tests passed" << std::endl;

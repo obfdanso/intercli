@@ -13,6 +13,7 @@
 #include <random>
 #include <mutex>
 #include <cstring>
+#include <cctype>
 #include <algorithm>
 #include <stdexcept>
 #include <sstream>
@@ -379,6 +380,43 @@ inline ChatMessage deserialize_chat(const std::vector<uint8_t>& data) {
         throw std::runtime_error("Chat text_len out of range");
     }
     return msg;
+}
+
+// A file name chosen by someone else, made safe to create inside a folder of
+// ours: no folders, no characters Windows refuses, no trailing dots or spaces,
+// and never one of Windows' device names (CON, NUL, COM1...), which would open
+// the device instead of a file.
+inline std::string safe_file_name(const std::string& name) {
+    const size_t slash = name.find_last_of("/\\");
+    std::string safe = slash == std::string::npos ? name : name.substr(slash + 1);
+    for (char& c : safe) {
+        if (static_cast<unsigned char>(c) < 0x20 || std::strchr(":*?\"<>|", c) != nullptr) {
+            c = '_';
+        }
+    }
+    while (!safe.empty() && (safe.back() == '.' || safe.back() == ' ')) {
+        safe.pop_back();
+    }
+    while (!safe.empty() && safe.front() == ' ') {
+        safe.erase(0, 1);
+    }
+    if (safe.empty()) {
+        return "file";  // also what "." and ".." come to
+    }
+    std::string base = safe.substr(0, safe.find('.'));
+    while (!base.empty() && base.back() == ' ') {
+        base.pop_back();
+    }
+    for (char& c : base) {
+        c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    }
+    const bool numbered_port = (base.rfind("COM", 0) == 0 || base.rfind("LPT", 0) == 0) && base.size() >= 4 &&
+                               base.size() <= 6 && !std::isalpha(static_cast<unsigned char>(base[3]));
+    if (base == "CON" || base == "PRN" || base == "AUX" || base == "NUL" || base == "CONIN$" ||
+        base == "CONOUT$" || numbered_port) {
+        safe.insert(safe.begin(), '_');
+    }
+    return safe;
 }
 
 // What AES-GCM authenticates alongside every encrypted frame: the protocol
