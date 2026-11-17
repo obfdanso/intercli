@@ -345,6 +345,9 @@ static ChatEvents listen(Ears& ears) {
     ev.on_presence = [&ears](const std::string& n, bool joined, const std::string&) {
         ears.add("presence:" + n + (joined ? ":joined" : ":left"));
     };
+    ev.on_peer_key = [&ears](const std::string& n, bool changed) {
+        ears.add("key:" + n + (changed ? ":changed" : ":fine"));
+    };
     ev.on_disconnected = [&ears](const std::string&) {
         { std::lock_guard<std::mutex> lock(ears.m); ears.lost = true; }
         ears.cv.notify_all();
@@ -504,8 +507,8 @@ static void file_tests() {
     check(b_ears.wait("file:ann:r:dev" + tail), "a member gets it, marked with the room");
     c.send_file(FileTarget::Room, "dev", "sneak.txt", {1, 2, 3});
     check(c_ears.wait("notice:You are not in the room dev"), "a file to a room you are not in is refused");
-    a.send_file(FileTarget::Direct, "zed", "lost.txt", std::vector<uint8_t>(3000, 1));
-    check(a_ears.wait("notice:No such user: zed"), "a file to nobody is refused");
+    check(!a.send_file(FileTarget::Direct, "zed", "lost.txt", std::vector<uint8_t>(3000, 1)),
+          "a file to nobody is not sent");
     check(!c_ears.heard("file:ann:r:dev" + tail) && !b_ears.heard("file:cat:r:dev:sneak.txt:3:6"),
           "room files stay in the room");
 
@@ -527,6 +530,9 @@ static void receipt_tests() {
     Ears a_ears, b_ears;
     ChatClient a(listen(a_ears));
     auto b = std::make_unique<ChatClient>(listen(b_ears));
+    // Ben keeps his key between visits, as the real clients do.
+    const auto ben_keys = std::make_shared<KeyStore>();
+    b->use_key_store(ben_keys);
     std::string error;
     check(a.connect("127.0.0.1", 18134, &error) && b->connect("127.0.0.1", 18134, &error), "two clients connect");
     a.request_name("ann");
@@ -550,6 +556,7 @@ static void receipt_tests() {
 
     Ears back_ears;
     ChatClient back(listen(back_ears));
+    back.use_key_store(ben_keys);
     check(back.connect("127.0.0.1", 18134, &error), "ben reconnects");
     back.request_name("ben");
     check(back_ears.wait("registered:ben"), "and joins again");
@@ -561,12 +568,86 @@ static void receipt_tests() {
     back.disconnect();
     check(a_ears.wait("presence:ben:left"), "ben leaves again");
     ChatClient third(listen(third_ears));
+    third.use_key_store(ben_keys);
     check(third.connect("127.0.0.1", 18134, &error), "ben reconnects once more");
     third.request_name("ben");
     check(third_ears.wait("registered:ben"), "and joins");
     a.send_direct("ben", "marker");
     check(third_ears.wait("direct:ann:marker"), "new messages arrive");
     check(!third_ears.heard("direct:ann:see this later"), "the kept message is not delivered twice");
+}
+
+// Direct messages are sealed between the two people: the server only passes
+// them on, and someone who takes over a name cannot read what was meant for
+// the person before.
+static void end_to_end_tests() {
+    ServerOptions options;
+    options.port = 18135;
+    Running server(options);
+    check(server.ok, "a server starts");
+
+    Ears a_ears, b_ears, c_ears;
+    ChatClient a(listen(a_ears)), c(listen(c_ears));
+    auto b = std::make_unique<ChatClient>(listen(b_ears));
+    std::string error;
+    check(a.connect("127.0.0.1", 18135, &error) && b->connect("127.0.0.1", 18135, &error) &&
+          c.connect("127.0.0.1", 18135, &error), "three clients connect");
+    a.request_name("ann");
+    b->request_name("ben");
+    c.request_name("cat");
+    check(a_ears.wait("registered:ann") && b_ears.wait("registered:ben") && c_ears.wait("registered:cat"),
+          "all three join");
+
+    check(a.safety_code_with("ben").empty(), "there is no safety code before a key is known");
+    check(a.send_direct("ben", "secret"), "a direct message is accepted");
+    check(b_ears.wait("direct:ann:secret"), "it arrives readable");
+    check(a_ears.wait("key:ben:fine") && b_ears.wait("key:ann:fine"), "each learns the other's key");
+    check(a.safety_code_with("ben").size() == 71 && a.safety_code_with("ben") == b->safety_code_with("ann"),
+          "both see the same safety code");
+    b->send_direct("ann", "reply");
+    check(a_ears.wait("direct:ben:reply"), "and the answer comes back");
+
+    check(a.request_key("cat") && a_ears.wait("key:cat:fine"), "a key can be asked for ahead of time");
+    check(!a.safety_code_with("cat").empty() && a.safety_code_with("cat") != a.safety_code_with("ben"),
+          "every pair has its own safety code");
+
+    // Many at once, before the key is known: all arrive, in the order written.
+    for (int i = 0; i < 20; ++i) {
+        c.send_direct("ben", "n" + std::to_string(i));
+    }
+    check(b_ears.wait("direct:cat:n19"), "messages written before the key arrived are sent");
+    {
+        std::lock_guard<std::mutex> lock(b_ears.m);
+        int next = 0;
+        for (const auto& e : b_ears.events) {
+            if (e == "direct:cat:n" + std::to_string(next)) ++next;
+        }
+        check(next == 20, "in the order they were written");
+    }
+
+    check(a.send_direct("ben", std::string(MAX_DIRECT_TEXT, 'x')), "the longest direct message is accepted");
+    check(b_ears.wait("direct:ann:" + std::string(MAX_DIRECT_TEXT, 'x')), "and arrives whole");
+    check(!a.send_direct("ben", std::string(MAX_DIRECT_TEXT + 1, 'x')), "one byte more is refused");
+
+    // Ben leaves. What ann writes meanwhile is sealed for ben's key, so
+    // someone else who takes the name gets it handed over but cannot read it.
+    b.reset();
+    check(a_ears.wait("presence:ben:left"), "ben leaves");
+    a.send_direct("ben", "for ben only");
+    check(a_ears.wait("receipt:ben:queued"), "a message for him is kept");
+
+    Ears eve_ears;
+    ChatClient eve(listen(eve_ears));
+    check(eve.connect("127.0.0.1", 18135, &error), "someone else connects");
+    eve.request_name("ben");
+    check(eve_ears.wait("registered:ben"), "and takes ben's name");
+    check(eve_ears.wait("notice:A private message from ann could not be read"),
+          "the kept message cannot be read with another key");
+    check(!eve_ears.heard("direct:ann:for ben only"), "so it is never shown");
+
+    a.send_direct("ben", "who are you");
+    check(a_ears.wait("key:ben:changed"), "the sender is warned that ben's key is different");
+    check(eve_ears.wait("direct:ann:who are you"), "messages written after that go to the new holder");
 }
 
 int main() {
@@ -638,6 +719,7 @@ int main() {
 
     std::cout << "Away messages and receipts" << std::endl;
     receipt_tests();
+    end_to_end_tests();
 
     if (failures == 0) {
         std::cout << "All server core tests passed" << std::endl;
