@@ -125,6 +125,7 @@ struct ClientConnection {
     std::string       address;         // what guesses are counted against: the IP
                                        // address, or the /64 network for IPv6
     std::string       peer;            // the client's exact IP address, for bans
+    std::string       e2e_key;         // the person's public key for end-to-end encryption, if given
     bool              counted_joined = false;  // released from the pending count
     std::atomic<bool> alive{true};         // false: the loop closes it on its next pass
 
@@ -1051,7 +1052,15 @@ struct SecureServer::Impl {
                         if (!options_.room_code.empty()) {
                             guess_succeeded(conn->address);
                         }
-                        const std::string wanted = get_chat_text(chat);
+                        // The name, then (from clients that have one) a zero
+                        // byte and the person's public key for end-to-end
+                        // encryption, which is only ever handed on, never used.
+                        const std::string asked = get_chat_text(chat);
+                        const size_t name_end = asked.find('\0');
+                        const std::string wanted = asked.substr(0, name_end);
+                        const std::string offered_key =
+                            name_end != std::string::npos && asked.size() - name_end - 1 == E2E_KEY_SIZE
+                                ? asked.substr(name_end + 1) : std::string();
                         std::string reason;
                         if (!is_valid_name(wanted)) {
                             reason = "Name must be 1-31 printable characters with no spaces, not starting with #";
@@ -1080,13 +1089,23 @@ struct SecureServer::Impl {
                             // In this order: what was kept is checked against the
                             // address the name had before this join.
                             deliver_kept(conn);
-                            remember_name(wanted, conn->peer);
+                            conn->e2e_key = offered_key;
+                            remember_name(wanted, conn->peer, offered_key);
                         }
                         continue;
                     }
 
                     if (conn->name.empty()) {
                         send_notice(conn, "Register a name before sending messages");
+                        continue;
+                    }
+
+                    if (chat.type == ChatType::KEY) {
+                        const std::string who = get_chat_field(chat.recipient, MAX_NAME_LEN);
+                        ChatMessage reply = make_chat(ChatType::KEY);
+                        set_chat_field(reply.sender, MAX_NAME_LEN, who);
+                        set_chat_text(reply, key_of(who));
+                        send_chat(conn, reply);
                         continue;
                     }
 
@@ -1327,16 +1346,29 @@ struct SecureServer::Impl {
     };
     std::map<std::string, std::deque<Kept>> kept_;
     std::map<std::string, std::string> seen_names_;  // name -> the address it last joined from
+    std::map<std::string, std::string> seen_keys_;   // name -> the public key it last joined with
     std::mutex kept_mutex_;
     static constexpr size_t kMaxKeptPerPerson = 50;
     static constexpr size_t kMaxKeptPerSender = 10;  // of those, from any one sender
     static constexpr size_t kMaxSeenNames = 1024;
 
-    void remember_name(const std::string& name, const std::string& address) {
+    void remember_name(const std::string& name, const std::string& address, const std::string& key) {
         std::lock_guard<std::mutex> lock(kept_mutex_);
         if (seen_names_.count(name) > 0 || seen_names_.size() < kMaxSeenNames) {
             seen_names_[name] = address;
+            seen_keys_[name] = key;
         }
+    }
+
+    // The public key of someone here, or of someone away whose messages are
+    // being kept (so they can be sealed for them meanwhile). Empty if unknown.
+    std::string key_of(const std::string& name) {
+        if (const std::shared_ptr<ClientConnection> here = lookup(name)) {
+            return here->e2e_key;
+        }
+        std::lock_guard<std::mutex> lock(kept_mutex_);
+        const auto it = seen_keys_.find(name);
+        return it == seen_keys_.end() ? std::string() : it->second;
     }
 
     // False if the name was never here, or its queue is full.
