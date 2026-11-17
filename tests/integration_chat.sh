@@ -49,6 +49,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# No client here touches the real key file: without a path a key lasts one run.
+export INTERCLI_KEY_FILE=
+
 "$SERVER" > "$WORK/server.log" 2>&1 &
 SERVER_PID=$!
 sleep 3
@@ -59,12 +62,12 @@ if ! kill -0 "$SERVER_PID" 2>/dev/null; then
 fi
 
 # alice stays connected long enough to receive everything the others send.
-{ echo alice; sleep 30; echo quit; } | "$CLIENT" 127.0.0.1 8080 > "$WORK/alice.out" 2>&1 &
+{ echo alice; sleep 30; echo quit; } | INTERCLI_KEY_FILE="$WORK/alice.keys" "$CLIENT" 127.0.0.1 8080 > "$WORK/alice.out" 2>&1 &
 ALICE=$!
 sleep 2
 
 # carol joins after alice, so alice sees a join notice for her.
-{ echo carol; sleep 26; echo quit; } | "$CLIENT" 127.0.0.1 8080 > "$WORK/carol.out" 2>&1 &
+{ echo carol; sleep 26; echo quit; } | INTERCLI_KEY_FILE="$WORK/carol.keys" "$CLIENT" 127.0.0.1 8080 > "$WORK/carol.out" 2>&1 &
 CAROL=$!
 sleep 2
 

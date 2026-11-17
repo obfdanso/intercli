@@ -20,6 +20,22 @@
 
 namespace {
 
+// Where this person's key for private messages lives: INTERCLI_KEY_FILE if
+// set, else a file in the user's own folder. Empty (nothing is saved) if
+// neither is known.
+std::string key_file() {
+    if (const char* chosen = std::getenv("INTERCLI_KEY_FILE")) {
+        return chosen;
+    }
+#ifdef _WIN32
+    const char* home = std::getenv("APPDATA");
+    return home != nullptr && *home != 0 ? std::string(home) + "\\intercli\\keys.txt" : std::string();
+#else
+    const char* home = std::getenv("HOME");
+    return home != nullptr && *home != 0 ? std::string(home) + "/.intercli/keys.txt" : std::string();
+#endif
+}
+
 // Redraws the prompt so an arriving message does not corrupt a half-typed line.
 void print_incoming(const std::string& line) {
     std::cout << "\r" << line << std::endl << "> " << std::flush;
@@ -27,7 +43,9 @@ void print_incoming(const std::string& line) {
 
 class TerminalClient {
 public:
-    explicit TerminalClient(std::string room_code) : client_(make_events()), room_code_(std::move(room_code)) {}
+    explicit TerminalClient(std::string room_code) : client_(make_events()), room_code_(std::move(room_code)) {
+        client_.use_key_store(std::make_shared<SecureComm::KeyStore>(key_file()));
+    }
 
     bool connect(const std::string& host, uint16_t port) {
         std::string error;
@@ -47,7 +65,8 @@ public:
         }
 
         std::cout << "\nInteractive mode"
-                  << "\n  @name message  send a direct message"
+                  << "\n  @name message  send a direct message (only the two of you can read it)"
+                  << "\n  /verify name   show the safety code you share with someone"
                   << "\n  message        send to everyone"
                   << "\n  /who           list who is online"
                   << "\n  /join room     join a room, creating it if needed"
@@ -112,6 +131,12 @@ private:
             print_incoming("[" + from + "] " + text);
         };
         ev.on_notice = [](const std::string& text) { print_incoming("*** " + text + " ***"); };
+        ev.on_peer_key = [](const std::string& name, bool changed) {
+            if (changed) {
+                print_incoming("*** " + name + " has a different key than last time, so it may be someone else. "
+                               "Compare safety codes with them: /verify " + name + " ***");
+            }
+        };
         ev.on_room_message = [](const std::string& room, const std::string& from, const std::string& text) {
             print_incoming("[#" + room + " " + from + "] " + text);
         };
@@ -209,6 +234,29 @@ private:
             return client_.request_roster();
         }
 
+        if (line.rfind("/verify", 0) == 0) {
+            const std::string name = line.size() > 8 ? line.substr(8) : "";
+            if (!SecureComm::is_valid_name(name)) {
+                std::cout << "Usage: /verify name" << std::endl;
+                return true;
+            }
+            // Their key may have to be fetched first.
+            std::string code = client_.safety_code_with(name);
+            if (code.empty() && client_.request_key(name)) {
+                for (int i = 0; i < 20 && code.empty(); ++i) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    code = client_.safety_code_with(name);
+                }
+            }
+            if (code.empty()) {
+                std::cout << "No key is known for " << name << std::endl;
+            } else {
+                std::cout << "Safety code with " << name << ": " << code
+                          << "\nIf " << name << " sees the same digits, nobody is in between." << std::endl;
+            }
+            return true;
+        }
+
         if (line.rfind("/send ", 0) == 0) {
             const size_t space = line.find(' ', 6);
             const std::string to = line.substr(6, space == std::string::npos ? std::string::npos : space - 6);
@@ -278,8 +326,9 @@ private:
             text = line.substr(space + 1);
         }
 
-        if (text.size() > SecureComm::MAX_TEXT_LEN) {
-            std::cout << "Message too long (max " << SecureComm::MAX_TEXT_LEN << " bytes)" << std::endl;
+        const size_t limit = direct ? SecureComm::MAX_DIRECT_TEXT : SecureComm::MAX_TEXT_LEN;
+        if (text.size() > limit) {
+            std::cout << "Message too long (max " << limit << " bytes)" << std::endl;
             return true;
         }
         return direct ? client_.send_direct(to, text) : client_.send_broadcast(text);
