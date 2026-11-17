@@ -45,6 +45,12 @@ class ChatController : public QObject {
     // For a direct conversation whose last message is ours: "Delivered", "Read",
     // or that it is being kept until the other person is back. Else empty.
     Q_PROPERTY(QString receipt READ receipt NOTIFY receiptChanged)
+    // Direct messages are sealed between the two people. The digits both can
+    // compare to be sure nobody sits in between; empty for rooms, Everyone,
+    // and until the other person's key is known.
+    Q_PROPERTY(QString peerSafetyCode READ peerSafetyCode NOTIFY peerSafetyCodeChanged)
+    // The most bytes a message may have here (sealing takes some room).
+    Q_PROPERTY(int textLimit READ textLimit NOTIFY currentConversationChanged)
     Q_PROPERTY(bool windowActive READ windowActive WRITE setWindowActive NOTIFY windowActiveChanged)
     Q_PROPERTY(bool historyAvailable READ historyAvailable CONSTANT)
     Q_PROPERTY(int historyChoice READ historyChoice NOTIFY historyChoiceChanged)
@@ -93,6 +99,11 @@ public:
     QVariantMap session() const;
     bool windowActive() const { return window_active_; }
     QString receipt() const { return receipts_.value(current_); }
+    QString peerSafetyCode() const;
+    int textLimit() const;
+    // Where this person's key for private messages and the keys seen for
+    // others are kept. Without one, a new key is made for every sign-in.
+    void setKeyStore(std::shared_ptr<SecureComm::KeyStore> store) { key_store_ = std::move(store); }
     bool historyAvailable() const { return history_ != nullptr; }
     int historyChoice() const;
     void setWindowActive(bool active);
@@ -182,6 +193,7 @@ signals:
     void sessionChanged();
     void windowActiveChanged();
     void receiptChanged();
+    void peerSafetyCodeChanged();
     void historyChoiceChanged();
     void hostingChanged();
     void peopleInChatChanged();
@@ -220,6 +232,7 @@ private:
     void onPresence(const QString& name, bool joined, const QString& raw);
     void onNotice(const QString& text);
     void onReceipt(const QString& peer, const QString& what);
+    void onPeerKey(const QString& name, bool changed);
     void setReceipt(const QString& conversation, const QString& text);
     void markSeen(const QString& conversation);
     void onRoomMessage(const QString& room, const QString& from, const QString& text);
@@ -246,6 +259,7 @@ private:
     QHash<QString, QString> receipts_;  // per direct conversation, about our latest message
     QSet<QString> owes_read_;           // people whose messages we haven't looked at yet
     QString download_dir_;
+    std::shared_ptr<SecureComm::KeyStore> key_store_;
     QStringList rooms_;     // rooms we are in, without the '#'; joined again after a reconnect
     QString pending_room_;  // a room the user just asked to join: opened once the server agrees
     bool window_active_ = true;

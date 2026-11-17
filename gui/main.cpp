@@ -59,6 +59,11 @@ int main(int argc, char* argv[]) {
     // Hosting a chat from this PC (the chat id, room code and identity key live here too).
     Intercli::HostSession host(data_dir);
     Intercli::ChatController chat(history_ok ? &history : nullptr, &host);
+    // This person's key for private messages, protected like the other keys
+    // here, and next to it the keys seen for other people.
+    const QByteArray chat_key = Intercli::loadOrCreateSecret(data_dir + "/chat.key", 32);
+    chat.setKeyStore(std::make_shared<SecureComm::KeyStore>(
+        (data_dir + "/people.txt").toStdString(), std::vector<uint8_t>(chat_key.begin(), chat_key.end())));
     qmlRegisterSingletonInstance("Intercli.Backend", 1, 0, "Chat", &chat);
     Intercli::WindowsFrame frame;
     qmlRegisterSingletonInstance("Intercli.Backend", 1, 0, "Frame", &frame);

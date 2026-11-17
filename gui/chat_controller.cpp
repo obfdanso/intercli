@@ -200,7 +200,12 @@ std::shared_ptr<SecureComm::ChatClient> ChatController::makeClient() {
     ev.on_send_key_rotated = [this, post] { post([this] { onSendKeyRotated(); }); };
     ev.on_receive_key_rotated = [this, post] { post([this] { emit sessionChanged(); }); };
     ev.on_disconnected = [this, post](const std::string& r) { post([this, r] { onDisconnected(qs(r)); }); };
-    return std::make_shared<SecureComm::ChatClient>(ev);
+    ev.on_peer_key = [this, post](const std::string& n, bool changed) {
+        post([this, n, changed] { onPeerKey(qs(n), changed); });
+    };
+    auto client = std::make_shared<SecureComm::ChatClient>(ev);
+    client->use_key_store(key_store_);
+    return client;
 }
 
 // Connects and asks for the name on a worker thread: RSA key generation, DNS and
@@ -606,6 +611,13 @@ void ChatController::setCurrentConversation(const QString& id) {
         current_ = key;
         emit currentConversationChanged();
         emit receiptChanged();
+        emit peerSafetyCodeChanged();
+        // Fetch the person's key now, so the safety code is there to compare
+        // before anything is written.
+        const bool direct = !key.isEmpty() && !key.startsWith(QLatin1Char('#'));
+        if (direct && state_ == Online && client_ && client_->safety_code_with(ss(key)).empty()) {
+            client_->request_key(ss(key));
+        }
     }
     if (window_active_) {
         markSeen(key);
@@ -819,6 +831,30 @@ void ChatController::onPresence(const QString& name, bool joined, const QString&
     if (known) {
         addRow(name, MessageModel::System, QString(), raw, true);
     }
+}
+
+void ChatController::onPeerKey(const QString& name, bool changed) {
+    if (changed) {
+        addRow(name, MessageModel::System, QString(),
+               name + QStringLiteral(" has a different key than last time, so this may be someone else. "
+                                     "Compare the safety code in the details panel with them."), false);
+    }
+    if (name == current_) {
+        emit peerSafetyCodeChanged();
+    }
+}
+
+QString ChatController::peerSafetyCode() const {
+    const bool direct = !current_.isEmpty() && !current_.startsWith(QLatin1Char('#'));
+    if (state_ != Online || !client_ || !direct) {
+        return QString();
+    }
+    return qs(client_->safety_code_with(ss(current_)));
+}
+
+int ChatController::textLimit() const {
+    const bool direct = !current_.isEmpty() && !current_.startsWith(QLatin1Char('#'));
+    return static_cast<int>(direct ? SecureComm::MAX_DIRECT_TEXT : SecureComm::MAX_TEXT_LEN);
 }
 
 void ChatController::onNotice(const QString& text) {
@@ -1038,7 +1074,7 @@ void ChatController::onDisconnected(const QString& reason) {
 }
 
 bool ChatController::send(const QString& text) {
-    if (state_ != Online || !client_ || text.trimmed().isEmpty() || Intercli::utf8Length(text) > 1024) {
+    if (state_ != Online || !client_ || text.trimmed().isEmpty() || Intercli::utf8Length(text) > textLimit()) {
         return false;
     }
     const std::string body = ss(text);
