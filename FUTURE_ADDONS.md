@@ -1,7 +1,9 @@
-# To do later
+# Future add-ons
 
-Known limits, written down so they aren't forgotten. Each is something that works today
-but should be better.
+Ideas for anyone who wants to build on intercli. Each entry is a known limit of what is
+here today: it works, but could be better. They are grouped by area; most are
+independent, so pick whichever interests you. The README covers how to build and run
+the tests, and every change so far has come with tests, which is a good habit to keep.
 
 ## File transfer
 - No progress bar and no cancel. A file shows as sent at once; a failure is reported after.
@@ -80,7 +82,8 @@ but should be better.
 - macOS is not built in CI.
 
 ## Never checked on screen
-These compile and their logic is tested, but nobody has clicked through them yet:
+These compile and their logic is tested, but have not been clicked through by hand yet,
+so they are a good place to start looking for bugs:
 host buttons (Remove, Ban, New Code, Unban, Clear Bans), the read receipts switch, the
 room box and Leave Room,
 drag-and-drop sending, the attach button and its file picker, the "Chats nearby" warning

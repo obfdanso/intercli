@@ -458,7 +458,7 @@ message shows the time it was written. Under your latest direct message the app 
 whether it was delivered, read, or is being kept for someone who is away. To stop
 telling others when you have read their messages, turn off **Tell others when I've read
 their messages** in the details panel (`/receipts off` in the terminal client). See
-`TODO.md` for the limits, the main one being that names aren't accounts.
+[FUTURE_ADDONS.md](FUTURE_ADDONS.md) for the limits, the main one being that names aren't accounts.
 
 ### Host controls (desktop app)
 
@@ -516,6 +516,9 @@ MIT: see [LICENSE](LICENSE). This is educational software; see the disclaimer be
 before relying on it.
 
 ## 🤝 Contributing
+
+Looking for something to build? [FUTURE_ADDONS.md](FUTURE_ADDONS.md) lists ideas and
+known limits, grouped by area.
 
 1. Fork the repository
 2. Create a feature branch
