@@ -254,7 +254,8 @@ Registered as alice
 
 | Input | Effect |
 |---|---|
-| `@bob hello` | Direct message to bob |
+| `@bob hello` | Direct message to bob, readable only by the two of you |
+| `/verify bob` | Show the safety code you share with bob |
 | `hello` | Broadcast to everyone else online |
 | `/who` | List who is currently online |
 | `rotate` | Rotate your send key |
@@ -305,9 +306,12 @@ history.
 
 ### Who can read your messages
 
-The host's server decrypts every message in order to route it, so the host can read
-everything sent in their chat. Encryption protects messages from other people on the
-network, not from the host. End-to-end encryption between users is not implemented.
+**Direct messages and files sent to one person are end-to-end encrypted:** only the two
+of you can read them. The host's server passes them on sealed and cannot open them.
+
+Messages to everyone and to rooms are different: the host's server decrypts those in order
+to route them, so the host can read them. Encryption protects them from other people on
+the network, not from the host. The host also still sees who writes to whom, and when.
 
 ## 🔐 Security details
 
@@ -371,6 +375,27 @@ inside the same encrypted channel as messages, so the host relays them like any 
 A received file is only ever saved, never run. Treat files from people you don't know as
 you would an email attachment.
 
+### End-to-end encryption of direct messages
+
+Everyone has a long-term X25519 key, made the first time they use intercli. The public
+half goes to the server when you join, and the server hands it to anyone who wants to
+write to you. The two of you then share an AES-256-GCM key (X25519, then HKDF-SHA256 over
+both public keys) that the server cannot work out. Every direct message, and every piece
+of a file sent to one person, is sealed with it and tied to who wrote it and who it is for.
+A message carries a number that only goes up, so an old one cannot be delivered again.
+
+- **Where your key lives:** the desktop app keeps it in its data folder, protected by
+  Windows for your account. The terminal client keeps it in `%APPDATA%\intercli\keys.txt`
+  (`~/.intercli/keys.txt` elsewhere), or the file named by `INTERCLI_KEY_FILE`.
+- **Safety code:** the server could hand out a key of its own instead of the other
+  person's. To rule that out, compare the 60-digit safety code with them, in person or on
+  a call: the details panel shows it in the app, `/verify name` in the terminal client. If
+  both see the same digits, nobody is in between.
+- **When someone's key changes** (a new PC, a reinstall, or someone else using the name)
+  you are warned, and the message you were sending is held back. Check the safety code,
+  then send again if you trust it.
+- A direct message can be up to 956 bytes (the sealing takes some room); others 1024.
+
 ### Away messages and receipts
 
 A direct message to someone who has left the chat is kept by the host and handed over
@@ -400,7 +425,10 @@ With someone's conversation open, the host's details panel can:
 - **First contact:** the very first join to a chat trusts the identity key the chat
   announces. Someone already on the network who answers faster than the real host
   could pose as it. Comparing safety codes out loud closes that gap.
-- **The host reads everything** (see above). There is no end-to-end encryption.
+- **The host can read messages to everyone and to rooms** (see above). Only direct
+  messages and direct files are end-to-end encrypted.
+- **No forward secrecy for direct messages:** someone who steals your key file later
+  can read direct messages they recorded earlier.
 - **Names aren't accounts:** anyone with the room code can join under any free name.
 - **Saved messages** are readable by anyone using the same Windows account who signs
   in with the same name to the same chat.
