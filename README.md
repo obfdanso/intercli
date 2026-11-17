@@ -133,13 +133,58 @@ cd build && ctest -C Release --output-on-failure
 ```
 
 This runs the crypto unit tests (`dh_key_exchange`, `aes_gcm`, `identity`,
-`chat_envelope`, `directional_keys`, `roster`), the server library test
+`chat_envelope`, `directional_keys`, `roster`), the key file and download tests
+(`key_store`, `downloads`), the server library test
 (`server_core`, including room codes and lockouts), `chat_client` (real clients
 against a real server, including tampered, replayed and injected frames through a
 test proxy) and `chat_integration` (three terminal clients). With Qt installed it also
 runs the desktop app's tests (`test_*`): models, the controller, saved messages,
 the title bar, finding chats nearby and hosting. The tests that start a server need
 `bash` (Git Bash on Windows) and are skipped where it isn't available.
+
+### Packaging
+
+After a Release build, `cpack` in the build folder makes a package with the programs and
+what they need to start:
+
+```bat
+cd build && cpack -C Release
+```
+
+- **Windows:** `intercli-1.0.0-Windows.zip` with `intercli.exe` (when Qt was found),
+  `server.exe`, the client, and the Qt and OpenSSL DLLs. If NSIS is installed
+  (`makensis`), an installer `.exe` is made too, with a Start menu entry.
+- **Linux / macOS:** a `.tar.gz` with the server and the terminal client.
+
+`cmake --install build --config Release --prefix <folder>` puts the same files in a
+folder instead.
+
+### Continuous integration
+
+`.github/workflows/ci.yml` runs on every push to `main` and every pull request:
+
+- **Linux:** builds the server and terminal client, runs the tests, makes the `.tar.gz`.
+- **Windows:** builds everything including the desktop app (Qt 6.8), runs the tests,
+  makes the zip (and the installer if NSIS is on the runner).
+- **Fuzzing:** a one-minute run of the parser fuzz target (below).
+
+The packages are kept as the run's artifacts. Pushing a tag such as `v1.0.0` also
+publishes them as a GitHub release once all three jobs pass.
+
+### Fuzzing
+
+`tests/fuzz_parsers.cpp` feeds random bytes to everything that reads what another
+machine sent: frame headers, the handshake, encrypted frames, chat messages, names,
+room codes and file names. It uses libFuzzer, so it needs clang:
+
+```bash
+cmake -B build-fuzz -DINTERCLI_FUZZ=ON -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_BUILD_TYPE=Release
+cmake --build build-fuzz --target fuzz_parsers
+./build-fuzz/fuzz_parsers -max_total_time=60 -max_len=4096
+```
+
+It is built with AddressSanitizer and UndefinedBehaviorSanitizer, so a crash, an
+out-of-bounds read or undefined behaviour stops it with the input that caused it.
 
 ## 🚀 Usage
 
@@ -390,7 +435,10 @@ A message carries a number that only goes up, so an old one cannot be delivered 
 
 - **Where your key lives:** the desktop app keeps it in its data folder, protected by
   Windows for your account. The terminal client keeps it in `%APPDATA%\intercli\keys.txt`
-  (`~/.intercli/keys.txt` elsewhere), or the file named by `INTERCLI_KEY_FILE`.
+  (`~/.intercli/keys.txt` elsewhere), or the file named by `INTERCLI_KEY_FILE`. On
+  Windows the private key in that file is protected for your account the same way (a
+  key written by an older version is protected the first time it is opened); elsewhere
+  the file can only be read by your user.
 - **Safety code:** the server could hand out a key of its own instead of the other
   person's. To rule that out, compare the 60-digit safety code with them, in person or on
   a call: the details panel shows it in the app, `/verify name` in the terminal client. If
@@ -404,10 +452,13 @@ A message carries a number that only goes up, so an old one cannot be delivered 
 ### Away messages and receipts
 
 A direct message to someone who has left the chat is kept by the host and handed over
-when they join again under the same name from the same address (up to 50 per person, for up to a day, and only
-while the chat keeps running). A kept message shows the time it was written. Under your latest direct message the app shows whether it
-was delivered, read, or is being kept for someone who is away. See `TODO.md` for the
-limits, the main one being that names aren't accounts.
+when they join again under the same name, from the same address and with the same key
+(up to 50 per person, for up to a day, and only while the chat keeps running). A kept
+message shows the time it was written. Under your latest direct message the app shows
+whether it was delivered, read, or is being kept for someone who is away. To stop
+telling others when you have read their messages, turn off **Tell others when I've read
+their messages** in the details panel (`/receipts off` in the terminal client). See
+`TODO.md` for the limits, the main one being that names aren't accounts.
 
 ### Host controls (desktop app)
 
@@ -415,8 +466,9 @@ With someone's conversation open, the host's details panel can:
 
 - **Remove** them: they are told the host removed them and disconnected, and can join again.
 - **Ban** them: the same, but their name and their address (unless it is the host's own
-  PC) are refused. Bans are kept on the host's PC and last every time it hosts, until
-  the host clicks **Clear Bans**.
+  PC) are refused. Bans are kept on the host's PC and last every time it hosts. The
+  host panel lists who is banned, with **Unban** next to each name and **Clear Bans**
+  for everyone at once.
 
 ### Finding chats nearby
 
@@ -460,7 +512,8 @@ With someone's conversation open, the host's details panel can:
 
 ## 📝 License
 
-This project is provided as educational software. Use at your own risk in production environments.
+MIT: see [LICENSE](LICENSE). This is educational software; see the disclaimer below
+before relying on it.
 
 ## 🤝 Contributing
 
