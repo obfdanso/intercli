@@ -229,15 +229,16 @@ int main() {
           "1024-byte message arrives whole");
 
     std::cout << "Key rotation" << std::endl;
-    // bob has sent 7 chat messages so far (REGISTER x2, WHO, direct, broadcast,
-    // direct to ghost, 1024-byte broadcast). The rejected one never went out.
+    // bob has sent 8 chat messages so far (REGISTER x2, WHO, the request for
+    // alice's key, direct, broadcast, the request for ghost's key, 1024-byte
+    // broadcast). The rejected one and the one to ghost never went out.
     const uint32_t before = bob.status().messages_until_rotation;
-    check(before == KEY_ROTATION_INTERVAL - 7, "messages until rotation counts down");
-    for (int i = 1; i <= 12; ++i) {
+    check(before == KEY_ROTATION_INTERVAL - 8, "messages until rotation counts down");
+    for (int i = 1; i <= 11; ++i) {
         bob.send_broadcast("filler-" + std::to_string(i));
     }
-    check(alice_log.wait_for([&] { return alice_log.count_prefix("broadcast:bob:filler-") == 12; }),
-          "all 12 messages arrive across the rotation");
+    check(alice_log.wait_for([&] { return alice_log.count_prefix("broadcast:bob:filler-") == 11; }),
+          "all 11 messages arrive across the rotation");
     SessionStatus st = bob.status();
     check(st.send_rotations == 1, "one automatic rotation after crossing 10 sent");
     check(st.last_send_rotation.has_value(), "rotation time is recorded");
