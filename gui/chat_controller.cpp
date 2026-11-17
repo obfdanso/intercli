@@ -613,9 +613,9 @@ void ChatController::setCurrentConversation(const QString& id) {
         emit receiptChanged();
         emit peerSafetyCodeChanged();
         // Fetch the person's key now, so the safety code is there to compare
-        // before anything is written.
+        // and a changed key is warned about before anything is written.
         const bool direct = !key.isEmpty() && !key.startsWith(QLatin1Char('#'));
-        if (direct && state_ == Online && client_ && client_->safety_code_with(ss(key)).empty()) {
+        if (direct && state_ == Online && client_) {
             client_->request_key(ss(key));
         }
     }
